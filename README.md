@@ -4,8 +4,8 @@ Arduino sketches driving the servos for an animatronic dragon head: eyes, eyelid
 
 ## Repository layout
 
-- [`dragon_servos_12/`](dragon_servos_12/dragon_servos_12.ino), [`dragon_servos_13/`](dragon_servos_13/dragon_servos_13.ino) — current sketches. `13` is the latest.
-- [`archive/`](archive/) — superseded versions 1–11, kept for history.
+- [`dragon_servos_15/`](dragon_servos_15/dragon_servos_15.ino) — current sketch, the latest version.
+- [`archive/`](archive/) — superseded versions 1–13, kept for history.
 - [`experiments/`](experiments/) — one-off test sketches not part of the main dragon build.
 - [`notes/`](notes/) — earlier code drafts and scratch notes saved as `.txt`.
 
@@ -19,14 +19,12 @@ Arduino sketches driving the servos for an animatronic dragon head: eyes, eyelid
 | `eyeRight` | 3 | 90 | 30–150 | |
 | `eyelidLeft` | 4 | 90 | 60–120 | |
 | `eyelidRight` | 5 | 90 | 60–120 | |
-| `jaw` | 6 | 90 | 15–120 | mounted reversed (see below) |
+| `jaw` | 6 | 90 | 15–120 | |
 | `neck1` | 7 | 90 | 30–150 | up/down |
 | `neck2` | 8 | 90 | 30–150 | side-to-side sway |
 | `neck3` | 9 | 90 | 30–150 | side-to-side sway |
 
 Pins, home angles, and safe ranges are all defined in one place at the top of the sketch (`servoConfigs[]`), so rewiring a servo to a different pin or changing its limits doesn't require touching the animation code below it.
-
-As of v13, a servo can be marked `reversed` in that same table if it's physically mounted backwards — the sketch flips the angle before writing to the hardware, so every animation still just thinks in terms of the logical 0–180 range. `jaw` is currently the only reversed servo.
 
 ### Controlling it
 
@@ -50,6 +48,7 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 | 10 | Refinements to the roar animation |
 | 11 | `ror two` (alternate roar) |
 | 12 | `eyes closed` / `eyes open`, `test1` smoke-test command |
-| 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw`); logical angle now tracked in code instead of read back from the servo |
+| 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw` was mounted reversed at the time); logical angle tracked in code instead of read back from the servo |
+| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13 |
 
-Versions 1–11 are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference. `12` and `13` are both kept at the top level since `13`'s only change is reversed-servo support — `12` remains a useful reference for boards without a reversed servo.
+All prior versions are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference.
