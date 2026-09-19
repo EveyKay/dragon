@@ -1,0 +1,296 @@
+#include <Servo.h>
+
+// ============================================================
+// SERVO-TO-PIN CONFIGURATION
+// This is the ONLY section you should need to edit when you
+// add, remove, or rewire a servo. Everything below reads from
+// this list automatically.
+// ============================================================
+
+struct ServoConfig {
+  const char* name;   // friendly name, used in Serial output
+  uint8_t pin;         // Arduino pin the servo signal wire is on
+  int homeAngle;       // resting/neutral angle (0-180)
+  int minAngle;         // safe minimum angle for this servo
+  int maxAngle;         // safe maximum angle for this servo
+};
+
+// Add/remove/edit rows here. Order doesn't matter.
+ServoConfig servoConfigs[] = {
+  { "eyeLeft",     2, 90,  60, 120 },
+  { "eyeRight",    3, 90,  60, 120 },
+  { "eyelidLeft",  4, 90,  60, 120 },
+  { "eyelidRight", 5, 90,  60, 120 },
+  { "jaw",         6, 90,  15, 120 },
+  { "neck1",       7, 90,  30, 150 },
+  { "neck2",       8, 90,  30, 150 },
+  { "neck3",       9, 90,  30, 150 },
+};
+
+const uint8_t NUM_SERVOS = sizeof(servoConfigs) / sizeof(servoConfigs[0]);
+
+// ============================================================
+// Everything below this line is generic plumbing — you
+// shouldn't need to touch it just to change pins/servos.
+// ============================================================
+
+Servo servos[NUM_SERVOS];
+
+// Look up a servo's array index by its friendly name.
+// Returns -1 if not found.
+int servoIndex(const char* name) {
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    if (strcmp(servoConfigs[i].name, name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Move a named servo to an angle, clamped to its configured safe range.
+void moveServo(const char* name, int angle) {
+  int idx = servoIndex(name);
+  if (idx == -1) {
+    Serial.print("Unknown servo: ");
+    Serial.println(name);
+    return;
+  }
+  angle = constrain(angle, servoConfigs[idx].minAngle, servoConfigs[idx].maxAngle);
+  servos[idx].write(angle);
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    servos[i].attach(servoConfigs[i].pin);
+    servos[i].write(servoConfigs[i].homeAngle);
+
+    Serial.print("Attached '");
+    Serial.print(servoConfigs[i].name);
+    Serial.print("' on pin ");
+    Serial.print(servoConfigs[i].pin);
+    Serial.print(" (home angle ");
+    Serial.print(servoConfigs[i].homeAngle);
+    Serial.println(")");
+  }
+
+  Serial.println("Dragon servo setup complete.");
+}
+
+void loop() {
+  handleSerialCommands();
+}
+
+// ============================================================
+// Synchronized blink
+// eyelidRight: 90 -> 71 -> 90
+// eyelidLeft:  90 -> 103 -> 90
+// Both move together, step by step, so they reach their closed
+// position at the same moment. "Slightly slower than normal"
+// speed is set by stepDelayMs below.
+// ============================================================
+void blinkEyelids() {
+  const int startAngle = 90;
+  const int rightClosed = 71;
+  const int leftClosed = 103;
+  const int stepDelayMs = 20; // higher = slower; ~15ms is "normal" servo speed, so 20ms is slightly slower
+
+  int rightSteps = abs(startAngle - rightClosed); // 19
+  int leftSteps = abs(leftClosed - startAngle);   // 13
+  int steps = max(rightSteps, leftSteps);          // use the larger so both arrive together
+
+  // Closing: startAngle -> closed
+  for (int i = 0; i <= steps; i++) {
+    float t = (float)i / steps; // 0.0 -> 1.0
+    int rightAngle = startAngle + t * (rightClosed - startAngle);
+    int leftAngle = startAngle + t * (leftClosed - startAngle);
+    moveServo("eyelidRight", rightAngle);
+    moveServo("eyelidLeft", leftAngle);
+    delay(stepDelayMs);
+  }
+
+  // Opening: closed -> startAngle
+  for (int i = 0; i <= steps; i++) {
+    float t = (float)i / steps;
+    int rightAngle = rightClosed + t * (startAngle - rightClosed);
+    int leftAngle = leftClosed + t * (startAngle - leftClosed);
+    moveServo("eyelidRight", rightAngle);
+    moveServo("eyelidLeft", leftAngle);
+    delay(stepDelayMs);
+  }
+}
+
+// ============================================================
+// Roar animation
+// At the same time:
+//   neck1: 90 -> 20
+//   jaw:   90 -> 20
+//   eyelids: full blink (90 -> closed -> 90), timed to happen
+//            within the same overall duration as the neck/jaw move
+// Type "ror" into the Serial Monitor to trigger it.
+// ============================================================
+void rorAnimation() {
+  const int neckStart = 90, neckEnd = 20;
+  const int jawStart = 90, jawEnd = 20;
+  const int eyelidStart = 90;
+  const int rightClosed = 71;
+  const int leftClosed = 103;
+
+  const int steps = 70;       // resolution of the animation (higher = smoother)
+  const int stepDelayMs = 20; // same slightly-slower-than-normal pace as blink
+
+  for (int i = 0; i <= steps; i++) {
+    float t = (float)i / steps; // 0.0 -> 1.0 across the whole animation
+
+    // Neck moves faster than the rest of the animation: it finishes
+    // its travel by the 35% mark, then holds at its end angle.
+    const float neckDuration = 0.35;
+    int neckAngle;
+    if (t <= neckDuration) {
+      float neckPhase = t / neckDuration;
+      neckAngle = neckStart + neckPhase * (neckEnd - neckStart);
+    } else {
+      neckAngle = neckEnd;
+    }
+
+    int jawAngle = jawStart + t * (jawEnd - jawStart);
+
+    // Eyelids do a full blink within the same duration, but now with
+    // an even longer hold in the middle so they stay closed longer:
+    // 0.00-0.20 = closing, 0.20-0.80 = holding closed, 0.80-1.00 = opening
+    const float closeEnd = 0.20;
+    const float holdEnd = 0.80;
+    int rightAngle, leftAngle;
+    if (t <= closeEnd) {
+      float phase = t / closeEnd;
+      rightAngle = eyelidStart + phase * (rightClosed - eyelidStart);
+      leftAngle = eyelidStart + phase * (leftClosed - eyelidStart);
+    } else if (t <= holdEnd) {
+      rightAngle = rightClosed;
+      leftAngle = leftClosed;
+    } else {
+      float phase = (t - holdEnd) / (1.0 - holdEnd);
+      rightAngle = rightClosed + phase * (eyelidStart - rightClosed);
+      leftAngle = leftClosed + phase * (eyelidStart - leftClosed);
+    }
+
+    moveServo("neck1", neckAngle);
+    moveServo("jaw", jawAngle);
+    moveServo("eyelidRight", rightAngle);
+    moveServo("eyelidLeft", leftAngle);
+
+    delay(stepDelayMs);
+  }
+
+  // Jaw wobble: 20 -> 35 -> 20, three times (wider swing = more prominent)
+  const int wobbleLow = 20, wobbleHigh = 35;
+  const int wobbleSteps = 10;
+  const int wobbleStepDelayMs = 20;
+
+  for (int rep = 0; rep < 3; rep++) {
+    // low -> high
+    for (int i = 0; i <= wobbleSteps; i++) {
+      float t = (float)i / wobbleSteps;
+      int jawAngle = wobbleLow + t * (wobbleHigh - wobbleLow);
+      moveServo("jaw", jawAngle);
+      delay(wobbleStepDelayMs);
+    }
+    // high -> low
+    for (int i = 0; i <= wobbleSteps; i++) {
+      float t = (float)i / wobbleSteps;
+      int jawAngle = wobbleHigh + t * (wobbleLow - wobbleHigh);
+      moveServo("jaw", jawAngle);
+      delay(wobbleStepDelayMs);
+    }
+  }
+
+  // Return all servos to their 90-degree home position, together
+  const int homeAngle = 90;
+  const int returnSteps = 70;
+  const int returnStepDelayMs = 20;
+
+  int neckFrom = neckEnd;   // 20
+  int jawFrom = wobbleLow;  // 20 (wobble always ends back at low)
+
+  for (int i = 0; i <= returnSteps; i++) {
+    float t = (float)i / returnSteps;
+    int neckAngle = neckFrom + t * (homeAngle - neckFrom);
+    int jawAngle = jawFrom + t * (homeAngle - jawFrom);
+    // eyelids are already at 90 from the blink, but include them
+    // so everything ends in sync and stays clamped/consistent
+    moveServo("neck1", neckAngle);
+    moveServo("jaw", jawAngle);
+    moveServo("eyelidRight", homeAngle);
+    moveServo("eyelidLeft", homeAngle);
+    delay(returnStepDelayMs);
+  }
+}
+// Type into the Serial Monitor: <servoName> <angle>
+// Example:   jaw 60
+// Press Enter (make sure Serial Monitor line ending is set to
+// "Newline" or "Both NL & CR").
+// ============================================================
+void handleSerialCommands() {
+  if (!Serial.available()) {
+    return;
+  }
+
+  String line = Serial.readStringUntil('\n');
+  line.trim();
+
+  if (line.length() == 0) {
+    return;
+  }
+
+  if (line.equalsIgnoreCase("blink")) {
+    Serial.println("Blinking...");
+    blinkEyelids();
+    Serial.println("Blink done.");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("ror")) {
+    Serial.println("Roaring...");
+    rorAnimation();
+    Serial.println("Roar done.");
+    return;
+  }
+
+  int spaceIndex = line.indexOf(' ');
+  if (spaceIndex == -1) {
+    Serial.println("Format: <servoName> <angle>   e.g. jaw 60");
+    return;
+  }
+
+  String name = line.substring(0, spaceIndex);
+  String angleStr = line.substring(spaceIndex + 1);
+  angleStr.trim();
+
+  if (angleStr.length() == 0) {
+    Serial.println("Format: <servoName> <angle>   e.g. jaw 60");
+    return;
+  }
+
+  int angle = angleStr.toInt();
+
+  int idx = servoIndex(name.c_str());
+  if (idx == -1) {
+    Serial.print("Unknown servo: ");
+    Serial.println(name);
+    Serial.print("Valid names: ");
+    for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+      Serial.print(servoConfigs[i].name);
+      if (i < NUM_SERVOS - 1) Serial.print(", ");
+    }
+    Serial.println();
+    return;
+  }
+
+  moveServo(name.c_str(), angle);
+
+  Serial.print(name);
+  Serial.print(" -> ");
+  Serial.print(constrain(angle, servoConfigs[idx].minAngle, servoConfigs[idx].maxAngle));
+  Serial.println(" degrees");
+}
