@@ -1,0 +1,20 @@
+# Arduino IDE / arduino-cli build artifacts
+build/
+*.hex
+*.elf
+*.eep
+*.bin
+*.map
+
+# Arduino IDE per-sketch cache
+.vscode/
+sketch.yaml
+.pio/
+
+# Compiled Python-based tooling caches some Arduino plugins leave behind
+__pycache__/
+*.pyc
+
+# OS cruft
+.DS_Store
+Thumbs.db
