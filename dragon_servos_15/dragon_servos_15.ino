@@ -1,4 +1,5 @@
 #include <Servo.h>
+#include <avr/pgmspace.h>
 
 // ============================================================
 // SERVO-TO-PIN CONFIGURATION
@@ -419,6 +420,99 @@ void eyesOpenAnimation() {
 }
 
 // ============================================================
+// Clip 5 bark
+// Servo motion generated directly from the volume envelope of
+// clip_05.mp3 (one of the dog-voiced takes) rather than hand-timed
+// like the animations above. The recording was sampled in 40ms
+// slices; jaw and neck1 track how loud it is at each slice, so the
+// mouth snaps open and the head dips on every bark and settles back
+// on the quiet stretches between them. Eyelids do one quick blink
+// right at the recording's single loudest instant (~3.48s in).
+// Type "clip5" into the Serial Monitor to trigger it.
+//
+// This only drives the servos -- it doesn't play the audio itself.
+// If you wire up a sound module later, start clip_05.mp3 at the
+// same time you call this function and the two will stay in sync,
+// since both run off the same 40ms-per-frame timeline.
+// ============================================================
+const uint8_t CLIP5_FRAME_MS = 40;
+const uint8_t CLIP5_NUM_FRAMES = 130;
+
+// Jaw angle per frame: louder in the recording -> lower angle ->
+// mouth more open.
+static const uint8_t clip5Jaw[CLIP5_NUM_FRAMES] PROGMEM = {
+  84, 85, 82, 58, 43, 37, 38, 34, 30, 25, 22, 24, 28, 35, 42, 49, 55, 60, 64, 69,
+  73, 76, 78, 80, 80, 81, 82, 84, 85, 86, 87, 87, 85, 76, 54, 43, 46, 51, 55, 52,
+  39, 33, 33, 36, 40, 44, 46, 48, 52, 57, 62, 66, 69, 72, 74, 76, 79, 80, 82, 83,
+  82, 82, 83, 81, 81, 81, 74, 50, 38, 32, 26, 23, 22, 22, 22, 22, 22, 20, 21, 22,
+  23, 27, 33, 40, 47, 54, 37, 26, 24, 22, 21, 21, 21, 21, 22, 23, 23, 22, 22, 24,
+  28, 33, 35, 27, 23, 23, 26, 31, 37, 39, 40, 43, 45, 48, 52, 56, 53, 45, 48, 44,
+  48, 52, 55, 55, 60, 61, 65, 68, 72, 76,
+};
+
+// Neck1 angle per frame: same shape as the jaw but smoothed with
+// extra lag, so the head follows the mouth instead of moving in
+// lockstep with it.
+static const uint8_t clip5Neck1[CLIP5_NUM_FRAMES] PROGMEM = {
+  88, 88, 86, 79, 70, 63, 59, 55, 51, 47, 44, 42, 42, 43, 44, 45, 47, 49, 51, 54,
+  56, 58, 61, 63, 65, 67, 68, 70, 72, 73, 75, 76, 77, 77, 72, 66, 63, 62, 62, 62,
+  58, 54, 51, 51, 51, 51, 52, 52, 53, 54, 56, 57, 59, 61, 62, 64, 66, 67, 69, 71,
+  72, 73, 74, 75, 76, 77, 77, 71, 63, 57, 52, 47, 44, 42, 40, 40, 39, 38, 38, 38,
+  38, 38, 39, 40, 42, 44, 45, 43, 42, 41, 40, 39, 38, 38, 38, 38, 38, 38, 38, 38,
+  39, 39, 40, 40, 40, 40, 40, 40, 41, 42, 43, 44, 45, 47, 48, 50, 51, 51, 52, 52,
+  53, 54, 55, 56, 57, 58, 59, 61, 62, 64,
+};
+
+void clip5Animation() {
+  const int eyelidStart = 90;
+  const int rightClosed = 71;
+  const int leftClosed = 103;
+
+  // Blink window: centered on the loudest frame in the recording
+  // (frame 87 of 0-129, ~3.48s in) -- closes, holds briefly, opens.
+  const int blinkStartFrame = 83;
+  const int blinkCloseFrame = 88;
+  const int blinkEndFrame = 93;
+
+  for (uint8_t i = 0; i < CLIP5_NUM_FRAMES; i++) {
+    int jawAngle = pgm_read_byte(&clip5Jaw[i]);
+    int neckAngle = pgm_read_byte(&clip5Neck1[i]);
+
+    // neck2/neck3 sway gently throughout, independent of loudness --
+    // the same "background life" role they play during rorAnimation().
+    float t = (float)i / (CLIP5_NUM_FRAMES - 1);
+    int neck2Angle = 90 + 10 * sin(2 * PI * 1.5 * t);
+    int neck3Angle = 90 + 6 * sin(2 * PI * 1.5 * t);
+
+    int rightAngle = eyelidStart;
+    int leftAngle = eyelidStart;
+    if (i >= blinkStartFrame && i < blinkCloseFrame) {
+      float phase = (float)(i - blinkStartFrame) / (blinkCloseFrame - blinkStartFrame);
+      rightAngle = eyelidStart + phase * (rightClosed - eyelidStart);
+      leftAngle = eyelidStart + phase * (leftClosed - eyelidStart);
+    } else if (i >= blinkCloseFrame && i < blinkEndFrame) {
+      float phase = (float)(i - blinkCloseFrame) / (blinkEndFrame - blinkCloseFrame);
+      rightAngle = rightClosed + phase * (eyelidStart - rightClosed);
+      leftAngle = leftClosed + phase * (eyelidStart - leftClosed);
+    }
+
+    moveServo("jaw", jawAngle);
+    moveServo("neck1", neckAngle);
+    moveServo("neck2", neck2Angle);
+    moveServo("neck3", neck3Angle);
+    moveServo("eyelidRight", rightAngle);
+    moveServo("eyelidLeft", leftAngle);
+
+    delay(CLIP5_FRAME_MS);
+  }
+
+  // Settle everything back to home once the envelope runs out.
+  const char* names[] = { "jaw", "neck1", "neck2", "neck3", "eyelidRight", "eyelidLeft" };
+  const int targets[] = { 90, 90, 90, 90, 90, 90 };
+  moveServosTogether(names, targets, 6, 40, 10);
+}
+
+// ============================================================
 // Test 1
 // Runs every named animation currently in the system, one after
 // another, with about a 3 second pause between each. Handy for
@@ -456,6 +550,10 @@ void test1Animation() {
 
   Serial.println("[test1] eyes open");
   eyesOpenAnimation();
+  delay(3000);
+
+  Serial.println("[test1] clip5");
+  clip5Animation();
   delay(3000);
 
   Serial.println("[test1] complete");
@@ -533,6 +631,13 @@ void handleSerialCommands() {
     Serial.println("Opening eyes...");
     eyesOpenAnimation();
     Serial.println("Eyes open.");
+    return;
+  }
+
+  if (line.equalsIgnoreCase("clip5")) {
+    Serial.println("Playing clip5...");
+    clip5Animation();
+    Serial.println("Clip5 done.");
     return;
   }
 

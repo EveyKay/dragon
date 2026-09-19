@@ -8,6 +8,7 @@ Arduino sketches driving the servos for an animatronic dragon head: eyes, eyelid
 - [`archive/`](archive/) — superseded versions 1–13, kept for history.
 - [`experiments/`](experiments/) — one-off test sketches not part of the main dragon build.
 - [`notes/`](notes/) — earlier code drafts and scratch notes saved as `.txt`.
+- [`sounds/`](sounds/) — dog-voiced audio takes referenced by sound-synced animations in the sketch.
 
 ## Wiring
 
@@ -36,7 +37,14 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 - `ror two` — alternate roar: neck/jaw bob through two cycles with a mid-blink
 - `look right` / `look left` / `front` — eyes and lower neck turn together, or reset to center
 - `eyes closed` / `eyes open` — eyelids to fully closed/open
+- `clip5` — servo motion generated from [`sounds/clip_05.mp3`](sounds/clip_05.mp3)'s volume envelope (see below)
 - `test1` — runs every animation above in sequence, for a quick smoke test after rewiring
+
+### Sound-synced animations
+
+`clip5Animation()` isn't hand-timed like the others — it's generated from the actual volume envelope of a recording. The audio is sampled in 40ms slices; the jaw and neck1 angles for each slice are derived directly from how loud that slice is, so the mouth snaps open and the head dips on every bark and eases back on the quiet stretches between them. The eyelids get one quick blink at the recording's single loudest instant. The per-frame angle tables live in the sketch itself (`clip5Jaw[]` / `clip5Neck1[]`); the source audio is kept in [`sounds/`](sounds/) for reference and for future resyncing if a sound module gets added.
+
+To generate a new one from another clip: run the file through a high-pass + FFT denoise pass, sample RMS loudness in fixed time slices (e.g. via `ffmpeg`'s `astats`/`ametadata` filters), normalize and smooth the envelope, then map it to servo angles the same way `clip5Jaw`/`clip5Neck1` do.
 
 ## Version history
 
