@@ -10,6 +10,18 @@ Arduino sketches driving the servos for an animatronic dragon head: eyes, eyelid
 - [`notes/`](notes/) — earlier code drafts and scratch notes saved as `.txt`.
 - [`sounds/`](sounds/) — dog-voiced audio takes referenced by sound-synced animations in the sketch.
 
+## Building
+
+The current sketch is set up as a [PlatformIO](https://platformio.org/) project (`platformio.ini` at the repo root, pointing at `dragon_servos_15/` as the source). PlatformIO IDE is installed as a VS Code extension for day-to-day editing, and the `pio` CLI works from this directory for scripted builds:
+
+```
+pio run              # compile
+pio run -t upload    # compile and flash to the Uno
+pio device monitor    # open the serial monitor at 9600 baud
+```
+
+Older sketches in `archive/` and `experiments/` are plain `.ino` files kept for reference — they aren't part of the PlatformIO build and would need their own environment if compiled again.
+
 ## Wiring
 
 8 servos, one Arduino, each servo's signal wire on its own digital pin. Power and ground for the servos should come from a supply rated for all 8 running at once — not the Arduino's 5V pin.
