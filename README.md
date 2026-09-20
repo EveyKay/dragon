@@ -52,6 +52,24 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 - `clip5` — servo motion generated from [`sounds/clip_05.mp3`](sounds/clip_05.mp3)'s volume envelope (see below)
 - `test1` — runs every animation above in sequence, for a quick smoke test after rewiring
 
+### Sound module (DFPlayer Mini)
+
+- DFPlayer TX → Arduino pin 10, DFPlayer RX → Arduino pin 11 (`SoftwareSerial`)
+- DFPlayer VCC → the LM2596/battery rail (**not** the Arduino's 5V pin — its amp draws more current than the Arduino's own regulator can reliably supply, and starving it can brown out the whole board)
+- DFPlayer GND → shared with the Arduino and servo ground (all one common ground)
+- SD card: FAT32, with an `mp3` folder in the root containing `0001.mp3`, `0002.mp3`, etc. — `playMp3Folder(N)` plays `000N.mp3`
+- `play <N>` in the Serial Monitor tests a track directly, independent of any animation
+
+**Speaker:** the stock/bundled speaker that ships with most DFPlayer kits is quiet even at max software volume (`dfPlayer.volume(30)`, already set in the sketch). For a louder upgrade, look for:
+
+- **4Ω impedance** (8Ω also works, but 4Ω lets the onboard amp deliver its full rated output)
+- **3W power rating** — matches what the DFPlayer Mini's amp is built to drive
+- **40–57mm diameter or larger** — noticeably louder/fuller than the tiny 20–28mm speakers commonly bundled with these kits, at the same wattage
+- **Enclosed/housed**, not a bare driver — an enclosure stops the front and back sound waves from canceling out, which matters more for perceived volume than most spec differences
+- Mounting it to fire into an enclosed cavity in the head (e.g. behind the mouth) with only a small opening to the outside can meaningfully boost volume for free, similar to an instrument body
+
+If a speaker swap still isn't loud enough, the next step up is a small external amplifier (e.g. a PAM8403-based board) between the DFPlayer's line-level output and the speaker, bypassing the onboard amp's power ceiling entirely.
+
 ### Sound-synced animations
 
 `clip5Animation()` isn't hand-timed like the others — it's generated from the actual volume envelope of a recording. The audio is sampled in 40ms slices; the jaw and neck1 angles for each slice are derived directly from how loud that slice is, so the mouth snaps open and the head dips on every bark and eases back on the quiet stretches between them. The eyelids get one quick blink at the recording's single loudest instant. The per-frame angle tables live in the sketch itself (`clip5Jaw[]` / `clip5Neck1[]`); the source audio is kept in [`sounds/`](sounds/) for reference and for future resyncing if a sound module gets added.
