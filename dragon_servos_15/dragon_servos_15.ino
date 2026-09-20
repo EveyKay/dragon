@@ -1,5 +1,18 @@
 #include <Servo.h>
 #include <avr/pgmspace.h>
+#include <SoftwareSerial.h>
+#include <DFRobotDFPlayerMini.h>
+
+// ============================================================
+// SOUND MODULE (DFPlayer Mini)
+// DFPlayer TX -> Arduino pin 10 (Arduino RX)
+// DFPlayer RX -> Arduino pin 11 (Arduino TX)
+// SD card layout: an "mp3" folder in the card's root containing
+// 0001.mp3, 0002.mp3, etc. -- playMp3Folder(N) plays 000N.mp3.
+// ============================================================
+SoftwareSerial dfSerial(10, 11); // RX, TX
+DFRobotDFPlayerMini dfPlayer;
+bool dfPlayerReady = false;
 
 // ============================================================
 // SERVO-TO-PIN CONFIGURATION
@@ -104,6 +117,15 @@ void setup() {
   }
 
   Serial.println("Dragon servo setup complete.");
+
+  dfSerial.begin(9600);
+  if (dfPlayer.begin(dfSerial)) {
+    dfPlayerReady = true;
+    dfPlayer.volume(20); // 0 (silent) - 30 (loudest)
+    Serial.println("DFPlayer ready.");
+  } else {
+    Serial.println("DFPlayer not found -- check wiring and SD card.");
+  }
 }
 
 void loop() {
@@ -464,6 +486,10 @@ static const uint8_t clip5Neck1[CLIP5_NUM_FRAMES] PROGMEM = {
 };
 
 void clip5Animation() {
+  if (dfPlayerReady) {
+    dfPlayer.playMp3Folder(5); // mp3/0005.mp3 -- the recording this animation is synced to
+  }
+
   const int eyelidStart = 90;
   const int rightClosed = 71;
   const int leftClosed = 103;
@@ -638,6 +664,24 @@ void handleSerialCommands() {
     Serial.println("Playing clip5...");
     clip5Animation();
     Serial.println("Clip5 done.");
+    return;
+  }
+
+  String lowerLine = line;
+  lowerLine.toLowerCase();
+  if (lowerLine.startsWith("play ")) {
+    if (!dfPlayerReady) {
+      Serial.println("DFPlayer not ready -- check wiring and SD card.");
+      return;
+    }
+    int trackNum = line.substring(5).toInt();
+    if (trackNum <= 0) {
+      Serial.println("Format: play <trackNumber>   e.g. play 5   (plays mp3/0005.mp3)");
+      return;
+    }
+    Serial.print("Playing track ");
+    Serial.println(trackNum);
+    dfPlayer.playMp3Folder(trackNum);
     return;
   }
 
