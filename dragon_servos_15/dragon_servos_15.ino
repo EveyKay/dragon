@@ -67,8 +67,8 @@ struct ServoConfig {
 ServoConfig servoConfigs[] = {
   { "eyeLeft",     2, 90,  30, 150,  0 },
   { "eyeRight",    3, 90,  30, 150,  0 },
-  { "eyelidLeft",  4, 90,  60, 120,  0 },
-  { "eyelidRight", 5, 90,  60, 120,  0 },
+  { "eyelidLeft",  4, 96,  60, 120,  0 },
+  { "eyelidRight", 5, 58,  35, 120,  0 },
   { "jaw",         6, 90,  15, 120,  0 },
   { "neck1",       7, 90,  30, 150,  0 },
   { "neck2",       8, 90,  30, 150, 15 },
@@ -250,37 +250,36 @@ void loop() {
 
 // ============================================================
 // Synchronized blink
-// eyelidRight: 90 -> 71 -> 90
-// eyelidLeft:  90 -> 103 -> 90
+// eyelidRight: 58 -> 40 -> 58
+// eyelidLeft:  96 -> 114 -> 96
 // Both move together, step by step, so they reach their closed
 // position at the same moment. "Slightly slower than normal"
 // speed is set by stepDelayMs below.
 // ============================================================
 void blinkEyelids() {
-  const int startAngle = 90;
-  const int rightClosed = 71;
-  const int leftClosed = 103;
+  const int rightOpen = 58, rightClosed = 40;
+  const int leftOpen = 96, leftClosed = 114;
   const int stepDelayMs = 20; // higher = slower; ~15ms is "normal" servo speed, so 20ms is slightly slower
 
-  int rightSteps = abs(startAngle - rightClosed); // 19
-  int leftSteps = abs(leftClosed - startAngle);   // 13
+  int rightSteps = abs(rightOpen - rightClosed);
+  int leftSteps = abs(leftClosed - leftOpen);
   int steps = max(rightSteps, leftSteps);          // use the larger so both arrive together
 
-  // Closing: startAngle -> closed
+  // Closing: open -> closed
   for (int i = 0; i <= steps; i++) {
     float t = (float)i / steps; // 0.0 -> 1.0
-    int rightAngle = startAngle + t * (rightClosed - startAngle);
-    int leftAngle = startAngle + t * (leftClosed - startAngle);
+    int rightAngle = rightOpen + t * (rightClosed - rightOpen);
+    int leftAngle = leftOpen + t * (leftClosed - leftOpen);
     moveServo("eyelidRight", rightAngle);
     moveServo("eyelidLeft", leftAngle);
     delay(stepDelayMs);
   }
 
-  // Opening: closed -> startAngle
+  // Opening: closed -> open
   for (int i = 0; i <= steps; i++) {
     float t = (float)i / steps;
-    int rightAngle = rightClosed + t * (startAngle - rightClosed);
-    int leftAngle = leftClosed + t * (startAngle - leftClosed);
+    int rightAngle = rightClosed + t * (rightOpen - rightClosed);
+    int leftAngle = leftClosed + t * (leftOpen - leftClosed);
     moveServo("eyelidRight", rightAngle);
     moveServo("eyelidLeft", leftAngle);
     delay(stepDelayMs);
@@ -307,9 +306,8 @@ void rorAnimation() {
 
   const int neckStart = 90, neckEnd = 20;
   const int jawStart = 90, jawEnd = 20;
-  const int eyelidStart = 90;
-  const int rightClosed = 71;
-  const int leftClosed = 103;
+  const int rightOpen = 58, rightClosed = 40;
+  const int leftOpen = 96, leftClosed = 114;
 
   const int steps = 70;       // resolution of the animation (higher = smoother)
   const int stepDelayMs = 14; // a bit quicker than before
@@ -338,15 +336,15 @@ void rorAnimation() {
     int rightAngle, leftAngle;
     if (t <= closeEnd) {
       float phase = t / closeEnd;
-      rightAngle = eyelidStart + phase * (rightClosed - eyelidStart);
-      leftAngle = eyelidStart + phase * (leftClosed - eyelidStart);
+      rightAngle = rightOpen + phase * (rightClosed - rightOpen);
+      leftAngle = leftOpen + phase * (leftClosed - leftOpen);
     } else if (t <= holdEnd) {
       rightAngle = rightClosed;
       leftAngle = leftClosed;
     } else {
       float phase = (t - holdEnd) / (1.0 - holdEnd);
-      rightAngle = rightClosed + phase * (eyelidStart - rightClosed);
-      leftAngle = leftClosed + phase * (eyelidStart - leftClosed);
+      rightAngle = rightClosed + phase * (rightOpen - rightClosed);
+      leftAngle = leftClosed + phase * (leftOpen - leftClosed);
     }
 
     // neck2 sways side to side slowly while neck1 is dropping, and
@@ -435,8 +433,8 @@ void rorAnimation() {
     int jawAngle = jawFrom + t * (homeAngle - jawFrom);
     moveServo("jaw", jawAngle);
     moveServo("neck1", homeAngle);
-    moveServo("eyelidRight", homeAngle);
-    moveServo("eyelidLeft", homeAngle);
+    moveServo("eyelidRight", rightOpen);
+    moveServo("eyelidLeft", leftOpen);
     delay(returnStepDelayMs);
   }
 }
@@ -518,9 +516,8 @@ void ror2Animation() {
   // within that window, eyelids stay open the rest of the time.
   const float blinkStart = 0.42;
   const float blinkEnd = 0.58;
-  const int eyelidStart = 90;
-  const int rightClosed = 71;
-  const int leftClosed = 103;
+  const int rightOpen = 58, rightClosed = 40;
+  const int leftOpen = 96, leftClosed = 114;
 
   for (int i = 0; i <= steps; i++) {
     float t = (float)i / steps;
@@ -529,21 +526,21 @@ void ror2Animation() {
     int neckAngle = (int)(wave + 0.5);
     int jawAngle = (int)(wave + 0.5);
 
-    int rightAngle = eyelidStart;
-    int leftAngle = eyelidStart;
+    int rightAngle = rightOpen;
+    int leftAngle = leftOpen;
     if (t >= blinkStart && t <= blinkEnd) {
       float local = (t - blinkStart) / (blinkEnd - blinkStart); // 0.0 -> 1.0 within the window
       if (local <= 1.0 / 3.0) {
         float phase = local / (1.0 / 3.0);
-        rightAngle = eyelidStart + phase * (rightClosed - eyelidStart);
-        leftAngle = eyelidStart + phase * (leftClosed - eyelidStart);
+        rightAngle = rightOpen + phase * (rightClosed - rightOpen);
+        leftAngle = leftOpen + phase * (leftClosed - leftOpen);
       } else if (local <= 2.0 / 3.0) {
         rightAngle = rightClosed;
         leftAngle = leftClosed;
       } else {
         float phase = (local - 2.0 / 3.0) / (1.0 / 3.0);
-        rightAngle = rightClosed + phase * (eyelidStart - rightClosed);
-        leftAngle = leftClosed + phase * (eyelidStart - leftClosed);
+        rightAngle = rightClosed + phase * (rightOpen - rightClosed);
+        leftAngle = leftClosed + phase * (leftOpen - leftClosed);
       }
     }
 
@@ -564,13 +561,13 @@ void ror2Animation() {
 // ============================================================
 void eyesClosedAnimation() {
   const char* names[] = { "eyelidRight", "eyelidLeft" };
-  const int targets[] = { 71, 103 };
+  const int targets[] = { 40, 114 };
   moveServosTogether(names, targets, 2, 40, 10);
 }
 
 void eyesOpenAnimation() {
   const char* names[] = { "eyelidRight", "eyelidLeft" };
-  const int targets[] = { 90, 90 };
+  const int targets[] = { 58, 96 };
   moveServosTogether(names, targets, 2, 40, 10);
 }
 
@@ -623,9 +620,8 @@ void clip5Animation() {
     dfPlayer.playMp3Folder(5); // mp3/0005.mp3 -- the recording this animation is synced to
   }
 
-  const int eyelidStart = 90;
-  const int rightClosed = 71;
-  const int leftClosed = 103;
+  const int rightOpen = 58, rightClosed = 40;
+  const int leftOpen = 96, leftClosed = 114;
 
   // Blink window: centered on the loudest frame in the recording
   // (frame 87 of 0-129, ~3.48s in) -- closes, holds briefly, opens.
@@ -654,16 +650,16 @@ void clip5Animation() {
     int neck2Angle = 90 + swayFade * 10 * sin(2 * PI * 1.5 * t);
     int neck3Angle = 90 + swayFade * 6 * sin(2 * PI * 1.5 * t);
 
-    int rightAngle = eyelidStart;
-    int leftAngle = eyelidStart;
+    int rightAngle = rightOpen;
+    int leftAngle = leftOpen;
     if (i >= blinkStartFrame && i < blinkCloseFrame) {
       float phase = (float)(i - blinkStartFrame) / (blinkCloseFrame - blinkStartFrame);
-      rightAngle = eyelidStart + phase * (rightClosed - eyelidStart);
-      leftAngle = eyelidStart + phase * (leftClosed - eyelidStart);
+      rightAngle = rightOpen + phase * (rightClosed - rightOpen);
+      leftAngle = leftOpen + phase * (leftClosed - leftOpen);
     } else if (i >= blinkCloseFrame && i < blinkEndFrame) {
       float phase = (float)(i - blinkCloseFrame) / (blinkEndFrame - blinkCloseFrame);
-      rightAngle = rightClosed + phase * (eyelidStart - rightClosed);
-      leftAngle = leftClosed + phase * (eyelidStart - leftClosed);
+      rightAngle = rightClosed + phase * (rightOpen - rightClosed);
+      leftAngle = leftClosed + phase * (leftOpen - leftClosed);
     }
 
     moveServo("jaw", jawAngle);
@@ -682,7 +678,7 @@ void clip5Animation() {
   // the 40ms-per-frame pace of the envelope itself, rather than snapping
   // the remaining distance shut.
   const char* names[] = { "jaw", "neck1", "neck2", "neck3", "eyelidRight", "eyelidLeft" };
-  const int targets[] = { 90, 90, 90, 90, 90, 90 };
+  const int targets[] = { 90, 90, 90, 90, 58, 96 };
   moveServosTogether(names, targets, 6, 60, 12);
 }
 
