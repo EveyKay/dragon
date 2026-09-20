@@ -1,7 +1,37 @@
-#include <Servo.h>
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
 #include <avr/pgmspace.h>
 #include <SoftwareSerial.h>
 #include <DFRobotDFPlayerMini.h>
+
+// ============================================================
+// SERVO DRIVER (PCA9685, via I2C)
+// Board's SCL -> Arduino A5, SDA -> Arduino A4, VCC -> Arduino 5V,
+// GND -> Arduino GND. Servo power (V+ terminal, separate from the
+// logic VCC pin) comes from the LM2596/battery rail, not the Arduino.
+//
+// Servos used to be driven directly by the Servo library, but that
+// relies on constant timer interrupts to hold position -- which
+// intermittently collided with SoftwareSerial's interrupts for the
+// DFPlayer, causing random servo glitches (and occasional dropouts
+// on whichever servo had the least torque margin) right around
+// sound-triggering commands. Routing servos through the PCA9685
+// instead removes the Arduino from pulse generation entirely, so
+// there's no timer interrupt left for SoftwareSerial to collide with.
+// ============================================================
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+
+// Pulse-length calibration, in ticks out of 4096 at 50Hz. These are
+// typical values for standard analog hobby servos -- if a servo
+// doesn't reach its full physical range (or over-travels), tune
+// these two numbers.
+// Matches the Arduino Servo library's own default pulse-width range
+// (544-2400us) at 50Hz, so 0-180 degrees lands on the exact same
+// physical positions all 8 servos were originally calibrated/wired
+// against -- switching to the PCA9685 shouldn't have shifted anyone's
+// idea of "90 degrees."
+const int SERVO_MIN_TICKS = 111; // 544us
+const int SERVO_MAX_TICKS = 492; // 2400us
 
 // ============================================================
 // SOUND MODULE (DFPlayer Mini)
@@ -23,22 +53,26 @@ bool dfPlayerReady = false;
 
 struct ServoConfig {
   const char* name;   // friendly name, used in Serial output
-  uint8_t pin;         // Arduino pin the servo signal wire is on
+  uint8_t channel;     // PCA9685 output channel (0-15) the servo plugs into
   int homeAngle;       // resting/neutral angle (0-180)
   int minAngle;         // safe minimum angle for this servo
   int maxAngle;         // safe maximum angle for this servo
+  int trim;             // degrees added before converting to PCA9685 ticks --
+                         // corrects small per-servo mechanical differences so
+                         // "90" always means visually centered, without any
+                         // animation code needing to know about the offset
 };
 
 // Add/remove/edit rows here. Order doesn't matter.
 ServoConfig servoConfigs[] = {
-  { "eyeLeft",     2, 90,  30, 150 },
-  { "eyeRight",    3, 90,  30, 150 },
-  { "eyelidLeft",  4, 90,  60, 120 },
-  { "eyelidRight", 5, 90,  60, 120 },
-  { "jaw",         6, 90,  15, 120 },
-  { "neck1",       7, 90,  30, 150 },
-  { "neck2",       8, 90,  30, 150 },
-  { "neck3",       9, 90,  30, 150 },
+  { "eyeLeft",     2, 90,  30, 150,  0 },
+  { "eyeRight",    3, 90,  30, 150,  0 },
+  { "eyelidLeft",  4, 90,  60, 120,  0 },
+  { "eyelidRight", 5, 90,  60, 120,  0 },
+  { "jaw",         6, 90,  15, 120,  0 },
+  { "neck1",       7, 90,  30, 150,  0 },
+  { "neck2",       8, 90,  30, 150, 15 },
+  { "neck3",       9, 90,  30, 150, 10 },
 };
 
 const uint8_t NUM_SERVOS = sizeof(servoConfigs) / sizeof(servoConfigs[0]);
@@ -48,7 +82,12 @@ const uint8_t NUM_SERVOS = sizeof(servoConfigs) / sizeof(servoConfigs[0]);
 // shouldn't need to touch it just to change pins/servos.
 // ============================================================
 
-Servo servos[NUM_SERVOS];
+// Tracks the last commanded angle for each servo. The PCA9685 has no
+// way to report back what it last set a channel to, so (unlike the
+// old Servo-library version) this is the only source of truth for
+// "where is this servo right now" -- moveServoSmooth() and
+// moveServosTogether() both read from this instead of a live sensor.
+int lastAngle[NUM_SERVOS];
 
 // Look up a servo's array index by its friendly name.
 // Returns -1 if not found.
@@ -70,7 +109,13 @@ void moveServo(const char* name, int angle) {
     return;
   }
   angle = constrain(angle, servoConfigs[idx].minAngle, servoConfigs[idx].maxAngle);
-  servos[idx].write(angle);
+  lastAngle[idx] = angle; // logical angle, untrimmed -- everything else in the
+                          // sketch (sway math, blinks, min/max clamps) keeps
+                          // working in this same "90 = center" space
+
+  int physicalAngle = constrain(angle + servoConfigs[idx].trim, 0, 180);
+  int ticks = map(physicalAngle, 0, 180, SERVO_MIN_TICKS, SERVO_MAX_TICKS);
+  pwm.setPWM(servoConfigs[idx].channel, 0, ticks);
 }
 
 // Smoothly ease a single named servo from wherever it currently is
@@ -86,7 +131,7 @@ void moveServoSmooth(const char* name, int targetAngle) {
   }
 
   int clampedTarget = constrain(targetAngle, servoConfigs[idx].minAngle, servoConfigs[idx].maxAngle);
-  int startAngle = servos[idx].read();
+  int startAngle = lastAngle[idx];
   int steps = abs(clampedTarget - startAngle);
   if (steps == 0) steps = 1;
 
@@ -103,14 +148,17 @@ void moveServoSmooth(const char* name, int targetAngle) {
 void setup() {
   Serial.begin(9600);
 
+  Wire.begin();
+  pwm.begin();
+  pwm.setPWMFreq(50); // standard hobby servo frequency
+
   for (uint8_t i = 0; i < NUM_SERVOS; i++) {
-    servos[i].attach(servoConfigs[i].pin);
-    servos[i].write(servoConfigs[i].homeAngle);
+    moveServo(servoConfigs[i].name, servoConfigs[i].homeAngle);
 
     Serial.print("Attached '");
     Serial.print(servoConfigs[i].name);
-    Serial.print("' on pin ");
-    Serial.print(servoConfigs[i].pin);
+    Serial.print("' on PCA9685 channel ");
+    Serial.print(servoConfigs[i].channel);
     Serial.print(" (home angle ");
     Serial.print(servoConfigs[i].homeAngle);
     Serial.println(")");
@@ -247,8 +295,16 @@ void blinkEyelids() {
 //   eyelids: full blink (90 -> closed -> 90), timed to happen
 //            within the same overall duration as the neck/jaw move
 // Type "ror" into the Serial Monitor to trigger it.
+//
+// Paired with mp3/0011.mp3 (sounds/clip_11.mp3) -- two closely-spaced
+// bursts that read as one sustained roar with a growl in the middle,
+// picked to match this animation's ~2.2s single-roar-with-wobble shape.
 // ============================================================
 void rorAnimation() {
+  if (dfPlayerReady) {
+    dfPlayer.playMp3Folder(11);
+  }
+
   const int neckStart = 90, neckEnd = 20;
   const int jawStart = 90, jawEnd = 20;
   const int eyelidStart = 90;
@@ -396,7 +452,7 @@ void moveServosTogether(const char* names[], const int targets[], int count, int
   int startAngles[MAX_GROUP_SERVOS];
   for (int c = 0; c < count; c++) {
     int idx = servoIndex(names[c]);
-    startAngles[c] = (idx != -1) ? servos[idx].read() : targets[c];
+    startAngles[c] = (idx != -1) ? lastAngle[idx] : targets[c];
   }
 
   for (int i = 0; i <= steps; i++) {
@@ -440,8 +496,17 @@ void frontAnimation() {
 // Right in the middle (t = 0.5), where neck1/jaw pass back through
 // 90 between the two cycles, the eyelids do one full blink.
 // Type "ror two" into the Serial Monitor to trigger it.
+//
+// Paired with mp3/0024.mp3 (sounds/ror_two.mp3) -- a single clean bark
+// from clip_07, sped up 1.5x and duplicated, with the two copies placed
+// 700ms apart so their peaks land exactly on this animation's two
+// mouth-fully-open instants (t=0.25 and t=0.75 of its 1.4s runtime).
 // ============================================================
 void ror2Animation() {
+  if (dfPlayerReady) {
+    dfPlayer.playMp3Folder(24);
+  }
+
   const float center = 55.0;    // midpoint between 90 (up) and 20 (down)
   const float amplitude = 35.0; // 55 +/- 35 = 90 and 20
   const int cycles = 2;         // two full up-down / open-close cycles
@@ -622,6 +687,34 @@ void clip5Animation() {
 }
 
 // ============================================================
+// Channel scan (diagnostic)
+// Cycles through PCA9685 channels 0-15 one at a time, wiggling each
+// briefly (a small +/-12 degree nudge around center, safe for any
+// standard servo regardless of its configured range) and printing
+// its number to the Serial Monitor. Watch which physical connector
+// moves and match it to the printed channel to figure out actual
+// wiring on an unlabeled board. Type "scan" to trigger it.
+// ============================================================
+void scanChannels() {
+  const int midTicks = (SERVO_MIN_TICKS + SERVO_MAX_TICKS) / 2;
+  const int wiggleTicks = 30; // ~12 degrees each way -- safe for every configured servo
+
+  for (uint8_t ch = 0; ch < 16; ch++) {
+    Serial.print("Channel ");
+    Serial.println(ch);
+
+    pwm.setPWM(ch, 0, midTicks - wiggleTicks);
+    delay(800);
+    pwm.setPWM(ch, 0, midTicks + wiggleTicks);
+    delay(800);
+    pwm.setPWM(ch, 0, midTicks);
+    delay(1500);
+  }
+
+  Serial.println("Scan complete.");
+}
+
+// ============================================================
 // Test 1
 // Runs every named animation currently in the system, one after
 // another, with about a 3 second pause between each. Handy for
@@ -765,6 +858,12 @@ void handleSerialCommands() {
     Serial.print("Playing track ");
     Serial.println(trackNum);
     dfPlayer.playMp3Folder(trackNum);
+    return;
+  }
+
+  if (line.equalsIgnoreCase("scan")) {
+    Serial.println("Scanning channels 0-15...");
+    scanChannels();
     return;
   }
 
