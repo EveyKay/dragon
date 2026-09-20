@@ -121,14 +121,82 @@ void setup() {
   dfSerial.begin(9600);
   if (dfPlayer.begin(dfSerial)) {
     dfPlayerReady = true;
-    dfPlayer.volume(20); // 0 (silent) - 30 (loudest)
+    dfPlayer.volume(30); // 0 (silent) - 30 (loudest)
     Serial.println("DFPlayer ready.");
   } else {
     Serial.println("DFPlayer not found -- check wiring and SD card.");
   }
 }
 
+// Prints whatever the DFPlayer itself reports (errors, card events,
+// end-of-track notifications). Without this, a failed play command
+// looks identical to a successful one from the Arduino's side --
+// the module just silently doesn't play anything.
+void checkDFPlayer() {
+  if (!dfPlayerReady || !dfPlayer.available()) {
+    return;
+  }
+
+  uint8_t type = dfPlayer.readType();
+  int value = dfPlayer.read();
+
+  switch (type) {
+    case TimeOut:
+      Serial.println(F("DFPlayer: timed out talking to module."));
+      break;
+    case WrongStack:
+      Serial.println(F("DFPlayer: got a malformed response."));
+      break;
+    case DFPlayerCardInserted:
+      Serial.println(F("DFPlayer: SD card inserted."));
+      break;
+    case DFPlayerCardRemoved:
+      Serial.println(F("DFPlayer: SD card removed."));
+      break;
+    case DFPlayerCardOnline:
+      Serial.println(F("DFPlayer: SD card online."));
+      break;
+    case DFPlayerPlayFinished:
+      Serial.print(F("DFPlayer: finished playing track "));
+      Serial.println(value);
+      break;
+    case DFPlayerError:
+      Serial.print(F("DFPlayer ERROR: "));
+      switch (value) {
+        case Busy:
+          Serial.println(F("no SD card found."));
+          break;
+        case Sleeping:
+          Serial.println(F("module is sleeping."));
+          break;
+        case SerialWrongStack:
+          Serial.println(F("got a malformed command."));
+          break;
+        case CheckSumNotMatch:
+          Serial.println(F("checksum mismatch."));
+          break;
+        case FileIndexOut:
+          Serial.println(F("track number out of range."));
+          break;
+        case FileMismatch:
+          Serial.println(F("can't find that file -- check it's named correctly in mp3/."));
+          break;
+        case Advertise:
+          Serial.println(F("advertise error."));
+          break;
+        default:
+          Serial.print(F("unknown error code "));
+          Serial.println(value);
+          break;
+      }
+      break;
+    default:
+      break;
+  }
+}
+
 void loop() {
+  checkDFPlayer();
   handleSerialCommands();
 }
 
@@ -496,9 +564,11 @@ void clip5Animation() {
 
   // Blink window: centered on the loudest frame in the recording
   // (frame 87 of 0-129, ~3.48s in) -- closes, holds briefly, opens.
-  const int blinkStartFrame = 83;
+  // 8 frames (320ms) each way, closer to blinkEyelids()'s natural
+  // pace, so it eases shut instead of snapping.
+  const int blinkStartFrame = 80;
   const int blinkCloseFrame = 88;
-  const int blinkEndFrame = 93;
+  const int blinkEndFrame = 96;
 
   for (uint8_t i = 0; i < CLIP5_NUM_FRAMES; i++) {
     int jawAngle = pgm_read_byte(&clip5Jaw[i]);
@@ -506,9 +576,18 @@ void clip5Animation() {
 
     // neck2/neck3 sway gently throughout, independent of loudness --
     // the same "background life" role they play during rorAnimation().
+    // Fades out over the last 20 frames so the sway settles to 90 on
+    // its own, instead of oscillating right up to the final frame and
+    // then snapping still the instant the settle-to-home phase below
+    // takes over.
     float t = (float)i / (CLIP5_NUM_FRAMES - 1);
-    int neck2Angle = 90 + 10 * sin(2 * PI * 1.5 * t);
-    int neck3Angle = 90 + 6 * sin(2 * PI * 1.5 * t);
+    const uint8_t swayFadeStartFrame = CLIP5_NUM_FRAMES - 20;
+    float swayFade = 1.0;
+    if (i >= swayFadeStartFrame) {
+      swayFade = 1.0 - (float)(i - swayFadeStartFrame) / (CLIP5_NUM_FRAMES - 1 - swayFadeStartFrame);
+    }
+    int neck2Angle = 90 + swayFade * 10 * sin(2 * PI * 1.5 * t);
+    int neck3Angle = 90 + swayFade * 6 * sin(2 * PI * 1.5 * t);
 
     int rightAngle = eyelidStart;
     int leftAngle = eyelidStart;
@@ -532,10 +611,14 @@ void clip5Animation() {
     delay(CLIP5_FRAME_MS);
   }
 
-  // Settle everything back to home once the envelope runs out.
+  // Settle everything back to home once the envelope runs out. Jaw/neck1
+  // can still be noticeably off from 90 at this point (the recording's
+  // last frame isn't necessarily quiet), so this eases out slower than
+  // the 40ms-per-frame pace of the envelope itself, rather than snapping
+  // the remaining distance shut.
   const char* names[] = { "jaw", "neck1", "neck2", "neck3", "eyelidRight", "eyelidLeft" };
   const int targets[] = { 90, 90, 90, 90, 90, 90 };
-  moveServosTogether(names, targets, 6, 40, 10);
+  moveServosTogether(names, targets, 6, 60, 12);
 }
 
 // ============================================================
