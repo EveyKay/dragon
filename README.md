@@ -24,20 +24,29 @@ Older sketches in `archive/` and `experiments/` are plain `.ino` files kept for 
 
 ## Wiring
 
-8 servos, one Arduino, each servo's signal wire on its own digital pin. Power and ground for the servos should come from a supply rated for all 8 running at once — not the Arduino's 5V pin.
+8 servos, driven through a **PCA9685 PWM driver board over I2C** rather than directly from the Arduino. Each servo plugs into its own channel on the PCA9685; the Arduino just sends it angle commands over I2C.
 
-| Servo | Pin | Home angle | Safe range | Notes |
-|---|---|---|---|---|
-| `eyeLeft` | 2 | 90 | 30–150 | |
-| `eyeRight` | 3 | 90 | 30–150 | |
-| `eyelidLeft` | 4 | 90 | 60–120 | |
-| `eyelidRight` | 5 | 90 | 60–120 | |
-| `jaw` | 6 | 90 | 15–120 | |
-| `neck1` | 7 | 90 | 30–150 | up/down |
-| `neck2` | 8 | 90 | 30–150 | side-to-side sway |
-| `neck3` | 9 | 90 | 30–150 | side-to-side sway |
+**Why not the `Servo` library directly:** that was the original design, but `Servo` relies on constant timer interrupts to hold every servo's position, which intermittently collided with `SoftwareSerial`'s interrupts for the DFPlayer — causing a glitch on a random servo after any sound-triggering command, and occasionally dropping the jaw (least torque margin) out entirely. Moving pulse generation to the PCA9685 removes the Arduino's timers from the picture, so there's nothing left for `SoftwareSerial` to collide with.
 
-Pins, home angles, and safe ranges are all defined in one place at the top of the sketch (`servoConfigs[]`), so rewiring a servo to a different pin or changing its limits doesn't require touching the animation code below it.
+**PCA9685 wiring:**
+- `VCC` → Arduino `5V`, `GND` → Arduino `GND`, `SCL` → Arduino `A5`, `SDA` → Arduino `A4` (logic/I2C side)
+- `V+` (a separate screw terminal from the logic `VCC` pin) → the LM2596/battery rail, its `GND` → shared common ground — servos draw real current, so they're powered the same way the DFPlayer is, not from the Arduino
+- Check for a jumper linking `VCC` and `V+` on your specific board and remove it if present — logic and servo power should stay electrically separate
+
+| Servo | PCA9685 channel | Home angle | Safe range | Trim | Notes |
+|---|---|---|---|---|---|
+| `eyeLeft` | 2 | 90 | 30–150 | — | |
+| `eyeRight` | 3 | 90 | 30–150 | — | |
+| `eyelidLeft` | 4 | 90 | 60–120 | — | |
+| `eyelidRight` | 5 | 90 | 60–120 | — | |
+| `jaw` | 6 | 90 | 15–120 | — | |
+| `neck1` | 7 | 90 | 30–150 | — | up/down |
+| `neck2` | 8 | 90 | 30–150 | +15° | side-to-side sway |
+| `neck3` | 9 | 90 | 30–150 | +10° | side-to-side sway |
+
+Channels, home angles, safe ranges, and trims are all defined in one place at the top of the sketch (`servoConfigs[]`), so rewiring a servo to a different channel or changing its limits doesn't require touching the animation code below it. `trim` corrects small per-servo mechanical differences (e.g. a horn seated slightly off) by nudging the actual PWM output while every animation still just thinks in terms of "90 = centered" — nothing outside `moveServo()` needs to know a trim exists.
+
+If your board's channels aren't numbered, type `scan` into the Serial Monitor: it cycles through channels 0–15, wiggling each one briefly and printing its number, so you can watch which physical connector moves and match it up.
 
 ### Controlling it
 
@@ -45,11 +54,12 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 
 - `<servoName> <angle>` — move one servo directly, e.g. `jaw 60`
 - `blink` — synchronized eyelid blink
-- `ror` — roar animation (neck drops, jaw opens, eyelids blink, neck sways)
-- `ror two` — alternate roar: neck/jaw bob through two cycles with a mid-blink
+- `ror` — roar animation (neck drops, jaw opens, eyelids blink, neck sways), paired with [`sounds/clip_11.mp3`](sounds/clip_11.mp3)
+- `ror two` — alternate roar: neck/jaw bob through two cycles with a mid-blink, paired with [`sounds/ror_two.mp3`](sounds/ror_two.mp3) (a single bark from a longer recording, sped up 1.5x and duplicated so its two peaks land exactly on this animation's two mouth-fully-open instants)
 - `look right` / `look left` / `front` — eyes and lower neck turn together, or reset to center
 - `eyes closed` / `eyes open` — eyelids to fully closed/open
 - `clip5` — servo motion generated from [`sounds/clip_05.mp3`](sounds/clip_05.mp3)'s volume envelope (see below)
+- `scan` — diagnostic: cycles PCA9685 channels 0–15, wiggling and announcing each one, for figuring out physical wiring on an unlabeled board
 - `test1` — runs every animation above in sequence, for a quick smoke test after rewiring
 
 ### Sound module (DFPlayer Mini)
@@ -87,6 +97,6 @@ To generate a new one from another clip: run the file through a high-pass + FFT 
 | 11 | `ror two` (alternate roar) |
 | 12 | `eyes closed` / `eyes open`, `test1` smoke-test command |
 | 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw` was mounted reversed at the time); logical angle tracked in code instead of read back from the servo |
-| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13 |
+| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection |
 
 All prior versions are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference.
