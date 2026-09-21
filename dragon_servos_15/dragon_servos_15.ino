@@ -100,6 +100,45 @@ int servoIndex(const char* name) {
   return -1;
 }
 
+// ============================================================
+// Idle mode's ambient background sway
+// Since Arduino can't run two things at once, "keep swaying while
+// an animation plays" means the animation's own step loop has to
+// call this itself on every iteration. idleSwayActive gates all of
+// it to a no-op outside idle mode, so blinkEyelids()/
+// moveServosTogether() behave exactly as before when called from
+// a plain Serial command.
+// ============================================================
+bool idleSwayActive = false;
+unsigned long idleSwayStartMillis = 0;
+float idleSwayScale = 1.0; // 1.0 = full idle sway, smaller = lessened during a bigger animation
+
+// While frozen, the sine wave's phase must hold at exactly the value
+// it had the instant the freeze began -- not reset to 0 -- so that
+// once amplitude fades back up, the position it's fading up around
+// still matches wherever it actually was, and doesn't jump. See the
+// freeze start/end handling in idleAnimation() for how these are set.
+bool idleSwayPhaseFrozen = false;
+unsigned long idleSwayFrozenElapsed = 0;
+
+bool servoInGroup(const char* name, const char* names[], int count) {
+  for (int i = 0; i < count; i++) {
+    if (strcmp(name, names[i]) == 0) return true;
+  }
+  return false;
+}
+
+// Drives whichever of neck1/neck2/neck3 are passed as true -- callers
+// pass false for any axis a bigger animation is actively controlling
+// itself, so the two motions never fight over the same servo.
+void applyIdleSway(bool doNeck1, bool doNeck2, bool doNeck3) {
+  if (!idleSwayActive) return;
+  unsigned long elapsed = idleSwayPhaseFrozen ? idleSwayFrozenElapsed : (millis() - idleSwayStartMillis);
+  if (doNeck1) moveServo("neck1", 90 + idleSwayScale * 14 * sin(2 * PI * elapsed / 4000.0));
+  if (doNeck2) moveServo("neck2", 90 + idleSwayScale * 10 * sin(2 * PI * elapsed / 5500.0));
+  if (doNeck3) moveServo("neck3", 90 + idleSwayScale * 7 * sin(2 * PI * elapsed / 7000.0));
+}
+
 // Move a named servo to an angle, clamped to its configured safe range.
 void moveServo(const char* name, int angle) {
   int idx = servoIndex(name);
@@ -116,6 +155,30 @@ void moveServo(const char* name, int angle) {
   int physicalAngle = constrain(angle + servoConfigs[idx].trim, 0, 180);
   int ticks = map(physicalAngle, 0, 180, SERVO_MIN_TICKS, SERVO_MAX_TICKS);
   pwm.setPWM(servoConfigs[idx].channel, 0, ticks);
+}
+
+// Eases a linear progress value (0.0-1.0) into an exponential
+// ease-in-out curve: starts slow, accelerates hard through the
+// middle, then decelerates into the target -- closer to how a real
+// muscle moves than a constant speed the whole way. Used everywhere
+// a linear t was previously fed directly into an interpolation.
+//
+// steepness controls how sharp the burst through the middle is --
+// higher means flatter start/end but a much higher PEAK velocity for
+// the same total duration (roughly proportional to steepness itself,
+// not just to total time), which is why stretching a movement's
+// duration can't fully compensate for a steeper curve. The default
+// (28) is used everywhere except flinchAnimation()'s snap-in, which
+// needed a much gentler curve to stay within what the servos could
+// track on a large, fast move.
+float easeInOutExpo(float t, float steepness = 28.0) {
+  if (t <= 0.0) return 0.0;
+  if (t >= 1.0) return 1.0;
+  if (t < 0.5) {
+    return 0.5 * pow(2.0, steepness * t - steepness / 2.0);
+  } else {
+    return 1.0 - 0.5 * pow(2.0, -steepness * t + steepness / 2.0);
+  }
 }
 
 // Smoothly ease a single named servo from wherever it currently is
@@ -138,7 +201,7 @@ void moveServoSmooth(const char* name, int targetAngle) {
   const int stepDelayMs = 12; // pace per degree of travel
 
   for (int i = 0; i <= steps; i++) {
-    float t = (float)i / steps;
+    float t = easeInOutExpo((float)i / steps);
     int angle = startAngle + t * (clampedTarget - startAngle);
     moveServo(name, angle);
     delay(stepDelayMs);
@@ -269,21 +332,23 @@ void blinkEyelids() {
 
   // Closing: open -> closed
   for (int i = 0; i <= steps; i++) {
-    float t = (float)i / steps; // 0.0 -> 1.0
+    float t = easeInOutExpo((float)i / steps); // 0.0 -> 1.0
     int rightAngle = rightOpen + t * (rightClosed - rightOpen);
     int leftAngle = leftOpen + t * (leftClosed - leftOpen);
     moveServo("eyelidRight", rightAngle);
     moveServo("eyelidLeft", leftAngle);
+    applyIdleSway(true, true, true); // blink never touches the neck, so all three stay free
     delay(stepDelayMs);
   }
 
   // Opening: closed -> open
   for (int i = 0; i <= steps; i++) {
-    float t = (float)i / steps;
+    float t = easeInOutExpo((float)i / steps);
     int rightAngle = rightClosed + t * (rightOpen - rightClosed);
     int leftAngle = leftClosed + t * (leftOpen - leftClosed);
     moveServo("eyelidRight", rightAngle);
     moveServo("eyelidLeft", leftAngle);
+    applyIdleSway(true, true, true);
     delay(stepDelayMs);
   }
 }
@@ -322,13 +387,13 @@ void rorAnimation() {
     const float neckDuration = 0.35;
     int neckAngle;
     if (t <= neckDuration) {
-      float neckPhase = t / neckDuration;
+      float neckPhase = easeInOutExpo(t / neckDuration);
       neckAngle = neckStart + neckPhase * (neckEnd - neckStart);
     } else {
       neckAngle = neckEnd;
     }
 
-    int jawAngle = jawStart + t * (jawEnd - jawStart);
+    int jawAngle = jawStart + easeInOutExpo(t) * (jawEnd - jawStart);
 
     // Eyelids do a full blink within the same duration, but now with
     // an even longer hold in the middle so they stay closed longer:
@@ -337,14 +402,14 @@ void rorAnimation() {
     const float holdEnd = 0.80;
     int rightAngle, leftAngle;
     if (t <= closeEnd) {
-      float phase = t / closeEnd;
+      float phase = easeInOutExpo(t / closeEnd);
       rightAngle = rightOpen + phase * (rightClosed - rightOpen);
       leftAngle = leftOpen + phase * (leftClosed - leftOpen);
     } else if (t <= holdEnd) {
       rightAngle = rightClosed;
       leftAngle = leftClosed;
     } else {
-      float phase = (t - holdEnd) / (1.0 - holdEnd);
+      float phase = easeInOutExpo((t - holdEnd) / (1.0 - holdEnd));
       rightAngle = rightClosed + phase * (rightOpen - rightClosed);
       leftAngle = leftClosed + phase * (leftOpen - leftClosed);
     }
@@ -398,11 +463,11 @@ void rorAnimation() {
   for (int rep = 0; rep < 3; rep++) {
     // low -> high
     for (int i = 0; i <= wobbleSteps; i++) {
-      float t = (float)i / wobbleSteps;
+      float t = easeInOutExpo((float)i / wobbleSteps);
       int jawAngle = wobbleLow + t * (wobbleHigh - wobbleLow);
       moveServo("jaw", jawAngle);
 
-      float neckT = (float)wobbleSubStep / (totalWobbleSubSteps - 1);
+      float neckT = easeInOutExpo((float)wobbleSubStep / (totalWobbleSubSteps - 1));
       moveServo("neck1", neckEnd + neckT * (90 - neckEnd));
       wobbleSubStep++;
 
@@ -410,11 +475,11 @@ void rorAnimation() {
     }
     // high -> low
     for (int i = 0; i <= wobbleSteps; i++) {
-      float t = (float)i / wobbleSteps;
+      float t = easeInOutExpo((float)i / wobbleSteps);
       int jawAngle = wobbleHigh + t * (wobbleLow - wobbleHigh);
       moveServo("jaw", jawAngle);
 
-      float neckT = (float)wobbleSubStep / (totalWobbleSubSteps - 1);
+      float neckT = easeInOutExpo((float)wobbleSubStep / (totalWobbleSubSteps - 1));
       moveServo("neck1", neckEnd + neckT * (90 - neckEnd));
       wobbleSubStep++;
 
@@ -431,7 +496,7 @@ void rorAnimation() {
   int jawFrom = wobbleLow; // 20 (wobble always ends back at low)
 
   for (int i = 0; i <= returnSteps; i++) {
-    float t = (float)i / returnSteps;
+    float t = easeInOutExpo((float)i / returnSteps);
     int jawAngle = jawFrom + t * (homeAngle - jawFrom);
     moveServo("jaw", jawAngle);
     moveServo("neck1", homeAngle);
@@ -448,19 +513,27 @@ void rorAnimation() {
 // ============================================================
 const uint8_t MAX_GROUP_SERVOS = 8;
 
-void moveServosTogether(const char* names[], const int targets[], int count, int steps, int stepDelayMs) {
+void moveServosTogether(const char* names[], const int targets[], int count, int steps, int stepDelayMs, float easeSteepness = 28.0) {
   int startAngles[MAX_GROUP_SERVOS];
   for (int c = 0; c < count; c++) {
     int idx = servoIndex(names[c]);
     startAngles[c] = (idx != -1) ? lastAngle[idx] : targets[c];
   }
 
+  // Neck axes this particular call isn't already driving are free
+  // for idleSway to keep moving underneath it (a no-op outside idle
+  // mode, since applyIdleSway() checks idleSwayActive itself).
+  bool freeNeck1 = !servoInGroup("neck1", names, count);
+  bool freeNeck2 = !servoInGroup("neck2", names, count);
+  bool freeNeck3 = !servoInGroup("neck3", names, count);
+
   for (int i = 0; i <= steps; i++) {
-    float t = (float)i / steps;
+    float t = easeInOutExpo((float)i / steps, easeSteepness);
     for (int c = 0; c < count; c++) {
       int angle = startAngles[c] + t * (targets[c] - startAngles[c]);
       moveServo(names[c], angle);
     }
+    applyIdleSway(freeNeck1, freeNeck2, freeNeck3);
     delay(stepDelayMs);
   }
 }
@@ -564,15 +637,50 @@ void flinchAnimation() {
   const char* names[] = { "neck1", "eyelidRight", "eyelidLeft" };
   const int startleTargets[] = { 130, 78, 76 }; // wide eyes: further open than the normal resting position
 
-  // 15 steps/4ms (60ms total) was too fast for the servos to keep up
-  // with cleanly on a ~40 degree move -- 25 steps/10ms is still a
-  // sharp snap but within what they can actually track.
-  moveServosTogether(names, startleTargets, 3, 25, 10);
+  // Stretching the duration alone couldn't keep up once
+  // easeInOutExpo()'s default curve got steeper -- peak velocity
+  // scales with steepness, not just total time, so this needs its
+  // own much gentler curve (steepness 10 vs. the default 28) rather
+  // than another round of more steps/more delay.
+  moveServosTogether(names, startleTargets, 3, 35, 16, 10.0);
 
   delay(250); // brief startled hold
 
   const int homeTargets[] = { 90, 58, 96 };
   moveServosTogether(names, homeTargets, 3, 40, 12); // ease back out, slower than the snap in
+}
+
+// ============================================================
+// Look and hold
+// Turns the eyes and neck2/neck3 to a random side and actually
+// holds there for several seconds -- unlike lookAroundAnimation(),
+// which sweeps through both sides and returns to front on its own
+// within about a second, this one lingers, like the dragon noticed
+// something and kept watching it. neck1 keeps doing its normal idle
+// sway throughout the hold (via applyIdleSway()), since this doesn't
+// touch that axis at all. Eases back to center once the hold ends.
+// No sound. Type "look hold" into the Serial Monitor to trigger it.
+// ============================================================
+void lookAndHoldAnimation() {
+  bool lookRight = random(0, 2) == 0; // picks a side at random each time
+
+  const char* names[] = { "eyeLeft", "eyeRight", "neck2", "neck3" };
+  const int rightTargets[] = { 140, 140, 130, 130 };
+  const int leftTargets[] = { 40, 40, 50, 50 };
+  const int* sideTargets = lookRight ? rightTargets : leftTargets;
+
+  moveServosTogether(names, sideTargets, 4, 80, 10);
+
+  long holdMs = random(5000, 12000);
+  const int holdStepMs = 100;
+  for (long waited = 0; waited < holdMs; waited += holdStepMs) {
+    if (Serial.available()) break;
+    applyIdleSway(true, false, false); // neck1 only -- neck2/neck3 stay held to the side
+    delay(holdStepMs);
+  }
+
+  const int frontTargets[] = { 90, 90, 90, 90 };
+  moveServosTogether(names, frontTargets, 4, 90, 12);
 }
 
 // ============================================================
@@ -620,14 +728,14 @@ void ror2Animation() {
     if (t >= blinkStart && t <= blinkEnd) {
       float local = (t - blinkStart) / (blinkEnd - blinkStart); // 0.0 -> 1.0 within the window
       if (local <= 1.0 / 3.0) {
-        float phase = local / (1.0 / 3.0);
+        float phase = easeInOutExpo(local / (1.0 / 3.0));
         rightAngle = rightOpen + phase * (rightClosed - rightOpen);
         leftAngle = leftOpen + phase * (leftClosed - leftOpen);
       } else if (local <= 2.0 / 3.0) {
         rightAngle = rightClosed;
         leftAngle = leftClosed;
       } else {
-        float phase = (local - 2.0 / 3.0) / (1.0 / 3.0);
+        float phase = easeInOutExpo((local - 2.0 / 3.0) / (1.0 / 3.0));
         rightAngle = rightClosed + phase * (rightOpen - rightClosed);
         leftAngle = leftClosed + phase * (leftOpen - leftClosed);
       }
@@ -742,11 +850,11 @@ void clip5Animation() {
     int rightAngle = rightOpen;
     int leftAngle = leftOpen;
     if (i >= blinkStartFrame && i < blinkCloseFrame) {
-      float phase = (float)(i - blinkStartFrame) / (blinkCloseFrame - blinkStartFrame);
+      float phase = easeInOutExpo((float)(i - blinkStartFrame) / (blinkCloseFrame - blinkStartFrame));
       rightAngle = rightOpen + phase * (rightClosed - rightOpen);
       leftAngle = leftOpen + phase * (leftClosed - leftOpen);
     } else if (i >= blinkCloseFrame && i < blinkEndFrame) {
-      float phase = (float)(i - blinkCloseFrame) / (blinkEndFrame - blinkCloseFrame);
+      float phase = easeInOutExpo((float)(i - blinkCloseFrame) / (blinkEndFrame - blinkCloseFrame));
       rightAngle = rightClosed + phase * (rightOpen - rightClosed);
       leftAngle = leftClosed + phase * (leftOpen - leftClosed);
     }
@@ -800,6 +908,176 @@ void scanChannels() {
 }
 
 // ============================================================
+// Idle mode
+// Randomly runs "self-returning" animations -- ones that do their
+// thing and settle back to home on their own -- with a 10-20 second
+// gap between each, to make the dragon look alive when nothing else
+// is happening. Deliberately excludes "stateful" animations like
+// eyesClosedAnimation() or lookRightAnimation() that move somewhere
+// and stay there, since a random pick landing on one of those and
+// not revisiting it for a while would look broken/stuck rather than
+// alive. Never triggers sound.
+//
+// The neck sways continuously in the background -- a different
+// period on each of the three neck servos so the combined motion
+// doesn't look like a robotic uniform wobble, closer to how a real
+// animal never holds perfectly still -- while the eyelids blink
+// regularly (every 3-6 seconds) and a bigger animation from the pool
+// below fires every 10-20 seconds. blinkEyelids() isn't in that pool
+// since the regular blinking already covers it; the pool is reserved
+// for the more distinctive moments.
+//
+// Big animations fire whenever their timer comes up, regardless of
+// where the sway currently has neck2/neck3. The sway doesn't stop
+// while one plays -- moveServosTogether() drives whichever neck axis
+// that particular animation isn't itself using (e.g. neck1 keeps
+// swaying during curiousTiltAnimation(), which only moves neck2/3),
+// just at a lessened amplitude so it reads as background motion
+// rather than competing with the animation. Once the animation
+// finishes, the neck is explicitly resynced to a clean 90 baseline
+// and the ambient sway fades back up to full amplitude from there.
+// lookAndHoldAnimation() is one of the animations in the pool --
+// unlike the others it lingers to one side for several seconds
+// before returning, with neck1 still swaying throughout the hold.
+//
+// Separately, a "freeze" eases the sway down to a dead stop for a
+// couple of seconds every 6-10 seconds (more often than the big
+// animations, less often than blinking), then eases back up --
+// just a moment of stillness before it keeps moving.
+//
+// Runs until any Serial input arrives (checked every tick, not
+// mid-animation) -- once buttons exist, this same check can be
+// swapped for reading a button pin instead.
+// Type "idle" into the Serial Monitor to start it.
+// ============================================================
+typedef void (*AnimationFunc)();
+AnimationFunc idleAnimations[] = {
+  curiousTiltAnimation,
+  yawnAnimation,
+  lookAroundAnimation,
+  flinchAnimation,
+  lookAndHoldAnimation,
+};
+const uint8_t NUM_IDLE_ANIMATIONS = sizeof(idleAnimations) / sizeof(idleAnimations[0]);
+
+void idleAnimation() {
+  Serial.println(F("Entering idle mode -- type anything to stop."));
+
+  const char* neckNames[] = { "neck1", "neck2", "neck3" };
+  const int neckHome[] = { 90, 90, 90 };
+
+  idleSwayActive = true;
+  idleSwayStartMillis = millis();
+  idleSwayScale = 1.0;
+
+  // 30ms (instead of the original 100ms) gives ~20 intermediate steps
+  // across the 600ms freeze fade instead of just 6, which was coarse
+  // enough to feel like discrete little jumps rather than one smooth
+  // motion.
+  const int swayStepMs = 30;
+  const long fadeMs = 1500;    // fade the ambient sway in after each resync
+  const long freezeFadeMs = 600; // fade the sway down into a freeze, and back up out of one
+
+  long sinceResync = 0; // ms since the neck was last at a clean 90 baseline
+  long nextBlinkAt = random(3000, 6000);
+  long nextBigAnimationAt = random(10000, 20000);
+
+  // "Freeze" -- the dragon just holds still for a few seconds before
+  // resuming the ambient sway, like it paused. More often than the
+  // big animations, less often than blinking.
+  long nextFreezeAt = random(6000, 10000);
+  long freezeStartedAt = -1; // -1 = not currently frozen
+  long freezeDurationMs = 0;
+
+  while (!Serial.available()) {
+    if (freezeStartedAt >= 0 && sinceResync - freezeStartedAt >= freezeDurationMs) {
+      freezeStartedAt = -1;
+      nextFreezeAt = sinceResync + random(6000, 10000);
+
+      // Resume the live clock exactly where the frozen phase left
+      // off, so position is continuous the instant amplitude is back
+      // to full -- not reset to a different point in the cycle.
+      idleSwayPhaseFrozen = false;
+      idleSwayStartMillis = millis() - idleSwayFrozenElapsed;
+    }
+    if (freezeStartedAt < 0 && sinceResync >= nextFreezeAt) {
+      freezeStartedAt = sinceResync;
+      freezeDurationMs = random(2000, 4000);
+
+      // Snapshot the current phase and hold it fixed for the whole
+      // freeze (fade-down, hold, and fade-up) -- only the amplitude
+      // changes during a freeze, never the position it's centered on.
+      idleSwayFrozenElapsed = millis() - idleSwayStartMillis;
+      idleSwayPhaseFrozen = true;
+    }
+
+    if (freezeStartedAt >= 0) {
+      // easeInOutExpo() has near-zero rate of change at both ends, so
+      // easing the fade itself (not just linearly ramping the scale)
+      // makes it visibly slow down right into the stop and slowly
+      // pick back up out of it, instead of a constant-rate ramp.
+      long sinceFreezeStart = sinceResync - freezeStartedAt;
+      if (sinceFreezeStart < freezeFadeMs) {
+        idleSwayScale = 1.0 - easeInOutExpo((float)sinceFreezeStart / freezeFadeMs);
+      } else if (sinceFreezeStart > freezeDurationMs - freezeFadeMs) {
+        // Progress INTO this fade-up window (0 at its start, 1 right
+        // as the freeze ends) -- not time-remaining-until-the-end,
+        // which was counting the wrong direction and made this ramp
+        // straight back down to 0 exactly when the freeze finished.
+        float t = (float)(sinceFreezeStart - (freezeDurationMs - freezeFadeMs)) / freezeFadeMs;
+        if (t > 1.0) t = 1.0;
+        idleSwayScale = easeInOutExpo(t);
+      } else {
+        idleSwayScale = 0.0;
+      }
+    } else {
+      idleSwayScale = (sinceResync < fadeMs) ? easeInOutExpo((float)sinceResync / fadeMs) : 1.0;
+    }
+    applyIdleSway(true, true, true);
+
+    if (sinceResync >= nextBlinkAt) {
+      blinkEyelids(); // keeps swaying underneath via its own applyIdleSway() calls
+      nextBlinkAt = sinceResync + random(3000, 6000);
+      if (Serial.available()) break;
+    }
+
+    if (sinceResync >= nextBigAnimationAt) {
+      // Lessen (not stop) the sway -- moveServosTogether() inside
+      // whichever animation runs will keep driving any neck axis it
+      // isn't using itself, at this reduced amplitude.
+      idleSwayScale = 0.7;
+
+      uint8_t idx = random(0, NUM_IDLE_ANIMATIONS);
+      idleAnimations[idx](); // fires from wherever neck2/neck3 currently are
+
+      if (Serial.available()) break;
+
+      // Resync to a clean baseline before the next ambient fade-in.
+      moveServosTogether(neckNames, neckHome, 3, 20, 10);
+
+      sinceResync = 0;
+      nextBlinkAt = random(3000, 6000);
+      nextBigAnimationAt = random(10000, 20000);
+      nextFreezeAt = random(6000, 10000);
+      freezeStartedAt = -1;
+      idleSwayPhaseFrozen = false; // in case a freeze happened to still be active when this fired
+      continue;
+    }
+
+    delay(swayStepMs);
+    sinceResync += swayStepMs;
+  }
+
+  idleSwayActive = false;
+
+  // Ease the neck back to exact home in case idle mode stopped
+  // mid-sway, so the next command starts from a known position.
+  moveServosTogether(neckNames, neckHome, 3, 20, 10);
+
+  Serial.println(F("Idle mode stopped."));
+}
+
+// ============================================================
 // Test 1
 // Runs every named animation currently in the system, one after
 // another, with about a 3 second pause between each. Handy for
@@ -845,6 +1123,10 @@ void test1Animation() {
 
   Serial.println(F("[test1] flinch"));
   flinchAnimation();
+  delay(3000);
+
+  Serial.println(F("[test1] look hold"));
+  lookAndHoldAnimation();
   delay(3000);
 
   Serial.println(F("[test1] eyes closed"));
@@ -951,6 +1233,13 @@ void handleSerialCommands() {
     return;
   }
 
+  if (line.equalsIgnoreCase("look hold")) {
+    Serial.println(F("Looking and holding..."));
+    lookAndHoldAnimation();
+    Serial.println(F("Look hold done."));
+    return;
+  }
+
   if (line.equalsIgnoreCase("eyes closed")) {
     Serial.println(F("Closing eyes..."));
     eyesClosedAnimation();
@@ -993,6 +1282,11 @@ void handleSerialCommands() {
   if (line.equalsIgnoreCase("scan")) {
     Serial.println(F("Scanning channels 0-15..."));
     scanChannels();
+    return;
+  }
+
+  if (line.equalsIgnoreCase("idle")) {
+    idleAnimation();
     return;
   }
 
