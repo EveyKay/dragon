@@ -3,6 +3,8 @@
 #include <avr/pgmspace.h>
 #include <SoftwareSerial.h>
 #include <DFRobotDFPlayerMini.h>
+#include <string.h>
+#include <stdlib.h>
 
 // ============================================================
 // SERVO DRIVER (PCA9685, via I2C)
@@ -100,6 +102,30 @@ int servoIndex(const char* name) {
   return -1;
 }
 
+// Eases a linear progress value (0.0-1.0) into an exponential
+// ease-in-out curve: starts slow, accelerates hard through the
+// middle, then decelerates into the target -- closer to how a real
+// muscle moves than a constant speed the whole way. Used everywhere
+// a linear t was previously fed directly into an interpolation.
+//
+// steepness controls how sharp the burst through the middle is --
+// higher means flatter start/end but a much higher PEAK velocity for
+// the same total duration (roughly proportional to steepness itself,
+// not just to total time), which is why stretching a movement's
+// duration can't fully compensate for a steeper curve. The default
+// (28) is used everywhere except flinchAnimation()'s snap-in, which
+// needed a much gentler curve to stay within what the servos could
+// track on a large, fast move.
+float easeInOutExpo(float t, float steepness = 28.0) {
+  if (t <= 0.0) return 0.0;
+  if (t >= 1.0) return 1.0;
+  if (t < 0.5) {
+    return 0.5 * pow(2.0, steepness * t - steepness / 2.0);
+  } else {
+    return 1.0 - 0.5 * pow(2.0, -steepness * t + steepness / 2.0);
+  }
+}
+
 // ============================================================
 // Idle mode's ambient background sway
 // Since Arduino can't run two things at once, "keep swaying while
@@ -160,6 +186,33 @@ void applyIdleSway(bool doNeck1, bool doNeck2, bool doNeck3) {
   if (doNeck3) moveServo("neck3", 90 + idleSwayScale * neck3SwayAmplitude * sin(2 * PI * elapsed / neck3SwayPeriodMs));
 }
 
+// ============================================================
+// Idle mode's ambient eye movement
+// Real eyes don't drift in a continuous sway the way a neck can --
+// they snap to a new point (a saccade) and hold there, so this is a
+// separate mechanic from applyIdleSway() rather than reusing its
+// sine-wave approach. idleAnimation()'s main loop schedules a new
+// random target every couple of seconds; this just interpolates the
+// current gaze position toward whatever that target currently is.
+// ============================================================
+int idleGazeStartAngle = 90;
+int idleGazeTargetAngle = 90;
+unsigned long idleGazeMoveStartMillis = 0;
+long idleGazeMoveDurationMs = 400;
+
+// Drives whichever of eyeLeft/eyeRight are passed as true -- same
+// free-axis pattern as applyIdleSway(), so a bigger animation that's
+// actively steering the eyes itself (tilt, look around, look hold)
+// takes priority and this just doesn't touch them meanwhile.
+void applyIdleGaze(bool doEyeLeft, bool doEyeRight) {
+  if (!idleSwayActive) return;
+  unsigned long elapsed = millis() - idleGazeMoveStartMillis;
+  float t = (elapsed >= (unsigned long)idleGazeMoveDurationMs) ? 1.0 : easeInOutExpo((float)elapsed / idleGazeMoveDurationMs);
+  int angle = idleGazeStartAngle + t * (idleGazeTargetAngle - idleGazeStartAngle);
+  if (doEyeLeft) moveServo("eyeLeft", angle);
+  if (doEyeRight) moveServo("eyeRight", angle);
+}
+
 // Move a named servo to an angle, clamped to its configured safe range.
 void moveServo(const char* name, int angle) {
   int idx = servoIndex(name);
@@ -176,30 +229,6 @@ void moveServo(const char* name, int angle) {
   int physicalAngle = constrain(angle + servoConfigs[idx].trim, 0, 180);
   int ticks = map(physicalAngle, 0, 180, SERVO_MIN_TICKS, SERVO_MAX_TICKS);
   pwm.setPWM(servoConfigs[idx].channel, 0, ticks);
-}
-
-// Eases a linear progress value (0.0-1.0) into an exponential
-// ease-in-out curve: starts slow, accelerates hard through the
-// middle, then decelerates into the target -- closer to how a real
-// muscle moves than a constant speed the whole way. Used everywhere
-// a linear t was previously fed directly into an interpolation.
-//
-// steepness controls how sharp the burst through the middle is --
-// higher means flatter start/end but a much higher PEAK velocity for
-// the same total duration (roughly proportional to steepness itself,
-// not just to total time), which is why stretching a movement's
-// duration can't fully compensate for a steeper curve. The default
-// (28) is used everywhere except flinchAnimation()'s snap-in, which
-// needed a much gentler curve to stay within what the servos could
-// track on a large, fast move.
-float easeInOutExpo(float t, float steepness = 28.0) {
-  if (t <= 0.0) return 0.0;
-  if (t >= 1.0) return 1.0;
-  if (t < 0.5) {
-    return 0.5 * pow(2.0, steepness * t - steepness / 2.0);
-  } else {
-    return 1.0 - 0.5 * pow(2.0, -steepness * t + steepness / 2.0);
-  }
 }
 
 // Smoothly ease a single named servo from wherever it currently is
@@ -358,7 +387,8 @@ void blinkEyelids() {
     int leftAngle = leftOpen + t * (leftClosed - leftOpen);
     moveServo("eyelidRight", rightAngle);
     moveServo("eyelidLeft", leftAngle);
-    applyIdleSway(true, true, true); // blink never touches the neck, so all three stay free
+    applyIdleSway(true, true, true); // blink never touches the neck or eyeballs, so all stay free
+    applyIdleGaze(true, true);
     delay(stepDelayMs);
   }
 
@@ -370,6 +400,7 @@ void blinkEyelids() {
     moveServo("eyelidRight", rightAngle);
     moveServo("eyelidLeft", leftAngle);
     applyIdleSway(true, true, true);
+    applyIdleGaze(true, true);
     delay(stepDelayMs);
   }
 }
@@ -541,12 +572,14 @@ void moveServosTogether(const char* names[], const int targets[], int count, int
     startAngles[c] = (idx != -1) ? lastAngle[idx] : targets[c];
   }
 
-  // Neck axes this particular call isn't already driving are free
-  // for idleSway to keep moving underneath it (a no-op outside idle
-  // mode, since applyIdleSway() checks idleSwayActive itself).
+  // Neck/eye axes this particular call isn't already driving are
+  // free for idleSway/idleGaze to keep moving underneath it (a
+  // no-op outside idle mode, since both check idleSwayActive first).
   bool freeNeck1 = !servoInGroup("neck1", names, count);
   bool freeNeck2 = !servoInGroup("neck2", names, count);
   bool freeNeck3 = !servoInGroup("neck3", names, count);
+  bool freeEyeLeft = !servoInGroup("eyeLeft", names, count);
+  bool freeEyeRight = !servoInGroup("eyeRight", names, count);
 
   for (int i = 0; i <= steps; i++) {
     float t = easeInOutExpo((float)i / steps, easeSteepness);
@@ -555,6 +588,7 @@ void moveServosTogether(const char* names[], const int targets[], int count, int
       moveServo(names[c], angle);
     }
     applyIdleSway(freeNeck1, freeNeck2, freeNeck3);
+    applyIdleGaze(freeEyeLeft, freeEyeRight);
     delay(stepDelayMs);
   }
 }
@@ -951,10 +985,17 @@ void scanChannels() {
 // doesn't look like a robotic uniform wobble, closer to how a real
 // animal never holds perfectly still. The amplitude and period of
 // that sway are re-randomized by randomizeSwayVariance() every time
-// there's a safe moment to do it invisibly (idleSwayScale already at
-// 0: after a resync, or right as a freeze ends), so the sway itself
-// keeps drifting in size and pace over time instead of being one
-// fixed repeating pattern. Meanwhile the eyelids blink
+// there's a safe moment to do it invisibly (idleSwayScale genuinely
+// at 0: right after a resync, or during a freeze's flat hold phase),
+// so the sway itself keeps drifting in size and pace over time
+// instead of being one fixed repeating pattern.
+//
+// The eyeballs get their own separate mechanic (applyIdleGaze()):
+// unlike the neck's continuous sway, real eyes snap to a new point
+// and hold there, so every couple of seconds they ease to a new
+// subtle random gaze target (+/-25 degrees, not a full look-left/
+// right turn) over a quick 300-700ms shift, then sit still until the
+// next one. Meanwhile the eyelids blink
 // regularly (every 3-6 seconds) and a bigger animation from the pool
 // below fires every 10-20 seconds. blinkEyelids() isn't in that pool
 // since the regular blinking already covers it; the pool is reserved
@@ -1003,6 +1044,11 @@ void idleAnimation() {
   idleSwayStartMillis = millis();
   idleSwayScale = 1.0;
   randomizeSwayVariance();
+
+  idleGazeStartAngle = 90;
+  idleGazeTargetAngle = 90;
+  idleGazeMoveStartMillis = millis();
+  long nextGazeShiftAt = random(1500, 4000);
 
   // 30ms (instead of the original 100ms) gives ~20 intermediate steps
   // across the 600ms freeze fade instead of just 6, which was coarse
@@ -1082,6 +1128,15 @@ void idleAnimation() {
     }
     applyIdleSway(true, true, true);
 
+    if (sinceResync >= nextGazeShiftAt) {
+      idleGazeStartAngle = idleGazeTargetAngle; // continue from wherever the last shift landed
+      idleGazeTargetAngle = 90 + random(-25, 26); // a subtle glance, not a full look-left/right turn
+      idleGazeMoveStartMillis = millis();
+      idleGazeMoveDurationMs = random(300, 700); // some shifts a bit quicker/slower than others
+      nextGazeShiftAt = sinceResync + idleGazeMoveDurationMs + random(1500, 4000);
+    }
+    applyIdleGaze(true, true);
+
     if (sinceResync >= nextBlinkAt) {
       blinkEyelids(); // keeps swaying underneath via its own applyIdleSway() calls
       nextBlinkAt = sinceResync + random(3000, 6000);
@@ -1103,6 +1158,17 @@ void idleAnimation() {
       moveServosTogether(neckNames, neckHome, 3, 20, 10);
       randomizeSwayVariance(); // safe here too -- the next fade-in starts from scale 0
 
+      // Whatever animation just ran may or may not have touched the
+      // eyes itself. Either way, pick up gaze from wherever they
+      // actually are right now rather than a target scheduled before
+      // the animation started -- otherwise the very next gaze tick
+      // could jump toward a now-stale target.
+      int currentEyeAngle = lastAngle[servoIndex("eyeLeft")];
+      idleGazeStartAngle = currentEyeAngle;
+      idleGazeTargetAngle = currentEyeAngle;
+      idleGazeMoveStartMillis = millis();
+      nextGazeShiftAt = random(1500, 4000);
+
       sinceResync = 0;
       nextBlinkAt = random(3000, 6000);
       nextBigAnimationAt = random(10000, 20000);
@@ -1118,9 +1184,12 @@ void idleAnimation() {
 
   idleSwayActive = false;
 
-  // Ease the neck back to exact home in case idle mode stopped
-  // mid-sway, so the next command starts from a known position.
-  moveServosTogether(neckNames, neckHome, 3, 20, 10);
+  // Ease the neck and eyes back to exact home in case idle mode
+  // stopped mid-sway or mid-glance, so the next command starts from
+  // a known position.
+  const char* neckAndEyeNames[] = { "neck1", "neck2", "neck3", "eyeLeft", "eyeRight" };
+  const int neckAndEyeHome[] = { 90, 90, 90, 90, 90 };
+  moveServosTogether(neckAndEyeNames, neckAndEyeHome, 5, 20, 10);
 
   Serial.println(F("Idle mode stopped."));
 }
@@ -1192,6 +1261,22 @@ void test1Animation() {
   Serial.println(F("[test1] complete"));
 }
 
+// Strips leading/trailing whitespace in place and returns a pointer
+// to the first non-whitespace character. Used instead of Arduino's
+// String::trim() so handleSerialCommands() doesn't need the String
+// class at all -- String pulls in a dynamic memory allocator
+// (malloc/realloc/free) that costs roughly 1KB of flash on its own,
+// which a fixed-size buffer and plain C string functions avoid
+// entirely for something this simple.
+char* trimWhitespace(char* s) {
+  while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+  if (*s == '\0') return s;
+  char* end = s + strlen(s) - 1;
+  while (end > s && (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n')) end--;
+  end[1] = '\0';
+  return s;
+}
+
 // ============================================================
 // Serial command handling
 // Type into the Serial Monitor: <servoName> <angle>
@@ -1204,119 +1289,119 @@ void handleSerialCommands() {
     return;
   }
 
-  String line = Serial.readStringUntil('\n');
-  line.trim();
+  char buf[32];
+  size_t len = Serial.readBytesUntil('\n', buf, sizeof(buf) - 1);
+  buf[len] = '\0';
+  char* line = trimWhitespace(buf);
 
-  if (line.length() == 0) {
+  if (line[0] == '\0') {
     return;
   }
 
-  if (line.equalsIgnoreCase("blink")) {
+  if (strcasecmp(line, "blink") == 0) {
     Serial.println(F("Blinking..."));
     blinkEyelids();
     Serial.println(F("Blink done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("ror")) {
+  if (strcasecmp(line, "ror") == 0) {
     Serial.println(F("Roaring..."));
     rorAnimation();
     Serial.println(F("Roar done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("ror two")) {
+  if (strcasecmp(line, "ror two") == 0) {
     Serial.println(F("Roaring (take two)..."));
     ror2Animation();
     Serial.println(F("Ror two done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("look right")) {
+  if (strcasecmp(line, "look right") == 0) {
     Serial.println(F("Looking right..."));
     lookRightAnimation();
     Serial.println(F("Look right done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("look left")) {
+  if (strcasecmp(line, "look left") == 0) {
     Serial.println(F("Looking left..."));
     lookLeftAnimation();
     Serial.println(F("Look left done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("front")) {
+  if (strcasecmp(line, "front") == 0) {
     Serial.println(F("Returning to front..."));
     frontAnimation();
     Serial.println(F("Front done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("tilt")) {
+  if (strcasecmp(line, "tilt") == 0) {
     Serial.println(F("Tilting head..."));
     curiousTiltAnimation();
     Serial.println(F("Tilt done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("yawn")) {
+  if (strcasecmp(line, "yawn") == 0) {
     Serial.println(F("Yawning..."));
     yawnAnimation();
     Serial.println(F("Yawn done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("look around")) {
+  if (strcasecmp(line, "look around") == 0) {
     Serial.println(F("Looking around..."));
     lookAroundAnimation();
     Serial.println(F("Look around done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("flinch")) {
+  if (strcasecmp(line, "flinch") == 0) {
     Serial.println(F("Flinching..."));
     flinchAnimation();
     Serial.println(F("Flinch done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("look hold")) {
+  if (strcasecmp(line, "look hold") == 0) {
     Serial.println(F("Looking and holding..."));
     lookAndHoldAnimation();
     Serial.println(F("Look hold done."));
     return;
   }
 
-  if (line.equalsIgnoreCase("eyes closed")) {
+  if (strcasecmp(line, "eyes closed") == 0) {
     Serial.println(F("Closing eyes..."));
     eyesClosedAnimation();
     Serial.println(F("Eyes closed."));
     return;
   }
 
-  if (line.equalsIgnoreCase("eyes open")) {
+  if (strcasecmp(line, "eyes open") == 0) {
     Serial.println(F("Opening eyes..."));
     eyesOpenAnimation();
     Serial.println(F("Eyes open."));
     return;
   }
 
-  if (line.equalsIgnoreCase("clip5")) {
+  if (strcasecmp(line, "clip5") == 0) {
     Serial.println(F("Playing clip5..."));
     clip5Animation();
     Serial.println(F("Clip5 done."));
     return;
   }
 
-  String lowerLine = line;
-  lowerLine.toLowerCase();
-  if (lowerLine.startsWith("play ")) {
+  if (strncasecmp(line, "play ", 5) == 0) {
     if (!dfPlayerReady) {
       Serial.println(F("DFPlayer not ready -- check wiring and SD card."));
       return;
     }
-    int trackNum = line.substring(5).toInt();
+    int trackNum = atoi(line + 5);
     if (trackNum <= 0) {
       Serial.println(F("Format: play <trackNumber>   e.g. play 5   (plays mp3/0005.mp3)"));
       return;
@@ -1327,41 +1412,41 @@ void handleSerialCommands() {
     return;
   }
 
-  if (line.equalsIgnoreCase("scan")) {
+  if (strcasecmp(line, "scan") == 0) {
     Serial.println(F("Scanning channels 0-15..."));
     scanChannels();
     return;
   }
 
-  if (line.equalsIgnoreCase("idle")) {
+  if (strcasecmp(line, "idle") == 0) {
     idleAnimation();
     return;
   }
 
-  if (line.equalsIgnoreCase("test1")) {
+  if (strcasecmp(line, "test1") == 0) {
     Serial.println(F("Running test1 (all animations)..."));
     test1Animation();
     return;
   }
 
-  int spaceIndex = line.indexOf(' ');
-  if (spaceIndex == -1) {
+  char* space = strchr(line, ' ');
+  if (space == NULL) {
     Serial.println(F("Format: <servoName> <angle>   e.g. jaw 60"));
     return;
   }
 
-  String name = line.substring(0, spaceIndex);
-  String angleStr = line.substring(spaceIndex + 1);
-  angleStr.trim();
+  *space = '\0';
+  char* name = line;
+  char* angleStr = trimWhitespace(space + 1);
 
-  if (angleStr.length() == 0) {
+  if (angleStr[0] == '\0') {
     Serial.println(F("Format: <servoName> <angle>   e.g. jaw 60"));
     return;
   }
 
-  int angle = angleStr.toInt();
+  int angle = atoi(angleStr);
 
-  int idx = servoIndex(name.c_str());
+  int idx = servoIndex(name);
   if (idx == -1) {
     Serial.print(F("Unknown servo: "));
     Serial.println(name);
@@ -1374,7 +1459,7 @@ void handleSerialCommands() {
     return;
   }
 
-  moveServoSmooth(name.c_str(), angle);
+  moveServoSmooth(name, angle);
 
   Serial.print(name);
   Serial.print(F(" -> "));
