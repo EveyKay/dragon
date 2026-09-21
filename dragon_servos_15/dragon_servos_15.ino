@@ -73,7 +73,7 @@ ServoConfig servoConfigs[] = {
   { "eyelidRight", 5, 58,  35, 120,  0 },
   { "jaw",         6, 90,  15, 120,  0 },
   { "neck1",       7, 90,  30, 150,  0 },
-  { "neck2",       8, 90,  30, 150, 15 },
+  { "neck2",       8, 90,  20, 165, 15 }, // range widened from 30-150 after testing found it can safely travel to 20/165 before binding
   { "neck3",       9, 90,  30, 150, 10 },
 };
 
@@ -103,9 +103,7 @@ unsigned long lastMoveMillis[NUM_SERVOS];
 // spike, or any future bug that tries to slam a servo across a big
 // distance in one tick, and silently slows the actual commanded angle
 // down to this rate instead. 0.2 deg/ms is comfortably under standard
-// hobby servo slew rates even under mechanical load, well past the
-// safety margin flinchAnimation() alone needed after several rounds of
-// tuning.
+// hobby servo slew rates even under mechanical load.
 const float MAX_DEGREES_PER_MS = 0.2;
 
 // Look up a servo's array index by its friendly name.
@@ -168,10 +166,7 @@ void moveServo(const char* name, int angle, bool capSpeed = true) {
 // the same total duration (roughly proportional to steepness itself,
 // not just to total time), which is why stretching a movement's
 // duration can't fully compensate for a steeper curve. The default
-// (20) is used everywhere except flinchAnimation(), which pins both
-// of its moves to explicit steepness values (8 for the snap-in, 28
-// for the ease back out) so it stays exactly as calibrated regardless
-// of this default.
+// (20) is used everywhere movement is eased through this curve.
 //
 // This used to go as high as 60, which crammed nearly all of a move's
 // travel into a narrow sliver of time near the middle -- MAX_DEGREES_PER_MS
@@ -300,10 +295,10 @@ void applyIdleGaze(bool doEyeLeft, bool doEyeRight) {
 // an animation's pose-hold, so whichever neck/eye axes that animation
 // isn't using stay free to keep swaying/glancing underneath instead of
 // freezing solid for the hold's duration. A flat delay() was exactly
-// what curiousTiltAnimation()/yawnAnimation()/lookAroundAnimation()/
-// flinchAnimation() used to do here, which is why the ambient motion
-// looked like it stopped in lockstep with each animation instead of
-// continuing through it.
+// what curiousTiltAnimation()/yawnAnimation()/lookAroundAnimation()
+// used to do here, which is why the ambient motion looked like it
+// stopped in lockstep with each animation instead of continuing
+// through it.
 void idleHold(long durationMs, bool doNeck1, bool doNeck2, bool doNeck3, bool doEyeLeft, bool doEyeRight) {
   const int stepMs = 20; // was 50 -- finer sampling keeps the steep sway curve looking like motion instead of a pop
   for (long waited = 0; waited < durationMs; waited += stepMs) {
@@ -791,40 +786,155 @@ void lookAroundAnimation() {
 }
 
 // ============================================================
-// Startled flinch
-// A quick, sharp snap: neck jerks back and eyelids pop wider open,
-// like something surprised it. Fast in, brief hold, eases back out
-// slower than it snapped in. No sound.
-// Type "flinch" into the Serial Monitor to trigger it.
+// Quick chomps
+// Three fast, shallow snaps of the jaw -- closed to a small open and
+// back -- like stretching the jaw rather than a full yawn or roar.
+// No sound. Type "chomp" into the Serial Monitor to trigger it.
 // ============================================================
-void flinchAnimation() {
-  const char* names[] = { "neck1", "eyelidRight", "eyelidLeft" };
-  const int startleTargets[] = { 130, 78, 76 }; // wide eyes: further open than the normal resting position
+void quickChompsAnimation() {
+  const char* names[] = { "jaw" };
+  const int openTarget[] = { 75 };  // a small, shallow open -- not a full yawn
+  const int closeTarget[] = { 90 };
 
-  // Fixed step counts assume neck1 starts near 90 -- fine when this
-  // is triggered directly, but idle mode's ambient sway can leave
-  // neck1 anywhere in its +/-14 degree range at the moment this
-  // fires, so the real distance can run noticeably longer than the
-  // ~40 degrees this was tuned around. Scaling steps (and therefore
-  // total duration) to the actual distance, the same way
-  // moveServoSmooth() already does, keeps peak velocity bounded no
-  // matter where it starts from, instead of always cramming whatever
-  // the distance turns out to be into the same fixed time budget.
-  int neck1Distance = abs(startleTargets[0] - lastAngle[servoIndex("neck1")]);
-  if (neck1Distance < 1) neck1Distance = 1;
-  // Both the pace and the curve are pinned well clear of the shared
-  // default (see easeInOutExpo()) and slowed down further on top of
-  // that -- this is the one motion in the whole sketch fast/sharp
-  // enough that the servos have visibly struggled with it before, so
-  // it stays deliberately conservative no matter how aggressive the
-  // curve gets everywhere else.
-  const int msPerDegree = 18; // was 14 -- more time per degree of travel
-  moveServosTogether(names, startleTargets, 3, neck1Distance, msPerDegree, 8.0); // was steepness 10.0
+  for (int rep = 0; rep < 3; rep++) {
+    moveServosTogether(names, openTarget, 1, 15, 10);  // quick snap open
+    moveServosTogether(names, closeTarget, 1, 15, 10); // quick snap closed
+  }
+}
 
-  idleHold(250, false, true, true, true, true); // brief startled hold -- flinch never touches neck2/neck3 or the eyes, so all of those stay free
+// ============================================================
+// Big side tilt
+// Unlike the curious tilt (where neck2 and neck3 lean together by
+// comparable amounts), this cranks neck2 almost all the way to its
+// safe range limit while neck3 only follows a little -- reading as
+// one joint doing a dramatic, near-maximum lean rather than the
+// whole neck leaning together. Eyes glance the same way. Picks a
+// side at random each time, and holds there noticeably longer than
+// the curious tilt before easing back to center. No sound. Type
+// "big tilt" into the Serial Monitor to trigger it.
+// ============================================================
+void bigTiltAnimation() {
+  bool tiltRight = random(0, 2) == 0; // picks a side at random each time
 
-  const int homeTargets[] = { 90, 58, 96 };
-  moveServosTogether(names, homeTargets, 3, 40, 12, 28.0); // ease back out, slower than the snap in -- pinned to the old default so raising it elsewhere doesn't change flinch at all
+  const int neck2Tilt = tiltRight ? 163 : 22; // almost the full 20-165 safe range
+  const int neck3Tilt = tiltRight ? 98 : 82;  // only a little follow-through
+  const int eyeTilt = tiltRight ? 148 : 32;
+
+  const char* names[] = { "neck2", "neck3", "eyeLeft", "eyeRight" };
+  const int leanTargets[] = { neck2Tilt, neck3Tilt, eyeTilt, eyeTilt };
+  moveServosTogether(names, leanTargets, 4, 90, 14); // slower than the curious tilt -- it has much further to travel
+
+  idleHold(1400, true, false, false, false, false); // a longer, more deliberate hold than the curious tilt -- neck1 is the only free axis here
+
+  const int homeTargets[] = { 90, 90, 90, 90 };
+  moveServosTogether(names, homeTargets, 4, 90, 14);
+}
+
+// ============================================================
+// Shake
+// Neck2 swings between its two tested safe extremes (the same 22/163
+// big tilt uses) one and a half times (high-low-high), like a head
+// shake, then settles back to center. Paced under the hard speed cap
+// despite the huge ~140-degree swing -- fast enough to read as a
+// shake, slow enough that the motor can actually keep up with the
+// full distance rather than getting throttled by MAX_DEGREES_PER_MS
+// mid-swing. No sound. Type "shake" into the Serial Monitor to
+// trigger it.
+// ============================================================
+void shakeAnimation() {
+  const char* names[] = { "neck2" };
+  const int highTarget[] = { 163 };
+  const int lowTarget[] = { 22 };
+
+  const int shakeSteps = 110;     // fine resolution across the full-range swing
+  const int shakeStepDelayMs = 7; // close to the floor: 141 degrees at the 0.2 deg/ms hard cap needs at least ~705ms, and this is ~770ms -- pushing much faster wouldn't actually move quicker, just ask for more than the cap allows and rely more heavily on the final step's snap to catch up
+
+  moveServosTogether(names, highTarget, 1, shakeSteps, shakeStepDelayMs);
+  moveServosTogether(names, lowTarget, 1, shakeSteps, shakeStepDelayMs);
+  moveServosTogether(names, highTarget, 1, shakeSteps, shakeStepDelayMs); // the extra "half" shake
+
+  const int homeTarget[] = { 90 };
+  moveServosTogether(names, homeTarget, 1, 40, 12);
+}
+
+// ============================================================
+// Shake chomp
+// Eyes close, then neck2 and jaw oscillate at the same time --
+// neck2 swinging between its shake extremes while the jaw does quick
+// little chomps -- like the dragon is shaking something in its mouth.
+// Built from easedOscillate() (the same continuous ping-pong curve
+// idle sway uses) rather than a hand-timed step loop, then settled
+// to an exact home through moveServosTogether() so neither axis ever
+// trails behind like rorAnimation() once did. No sound. Type "shake
+// chomp" into the Serial Monitor to trigger it.
+// ============================================================
+void shakeChompAnimation() {
+  const char* eyeNames[] = { "eyelidRight", "eyelidLeft" };
+  const int closedTargets[] = { 40, 114 };
+  moveServosTogether(eyeNames, closedTargets, 2, 20, 15); // ease eyes shut first
+
+  const float neck2Center = 92.5, neck2Amplitude = 70.5, neck2PeriodMs = 1540; // same 22/163 extremes and pace as shakeAnimation()
+  const float jawCenter = 82.5, jawAmplitude = 7.5, jawPeriodMs = 600;         // a quick little chomp roughly every 300ms
+
+  const unsigned long totalDurationMs = 1.5 * neck2PeriodMs; // 1.5 shakes, matching shakeAnimation()
+  const int stepMs = 15;
+  unsigned long startMillis = millis();
+
+  while (millis() - startMillis < totalDurationMs) {
+    unsigned long elapsed = millis() - startMillis;
+    int neck2Angle = (int)(neck2Center + easedOscillate(elapsed, neck2PeriodMs, neck2Amplitude) + 0.5);
+    int jawAngle = (int)(jawCenter + easedOscillate(elapsed, jawPeriodMs, jawAmplitude) + 0.5);
+
+    moveServo("neck2", neck2Angle);
+    moveServo("jaw", jawAngle);
+    applyIdleSway(true, false, true); // neck1/neck3 stay free -- neck2 is driven directly above
+    applyIdleGaze(true, true);        // eyeball gaze stays free -- only the eyelids are held shut
+
+    delay(stepMs);
+  }
+
+  const char* names[] = { "neck2", "jaw" };
+  const int homeTargets[] = { 90, 90 };
+  moveServosTogether(names, homeTargets, 2, 30, 10); // land both exactly on home, same fix as shakeAnimation()'s final step
+
+  const int openTargets[] = { 58, 96 };
+  moveServosTogether(eyeNames, openTargets, 2, 20, 15); // reopen eyes
+}
+
+// ============================================================
+// Neck stretch / look up
+// Neck1 cranes upward and holds, like sniffing the air or watching
+// something overhead, before easing back down to home. No sound.
+// Type "look up" into the Serial Monitor to trigger it.
+// ============================================================
+void neckStretchAnimation() {
+  const char* names[] = { "neck1" };
+  const int upTarget[] = { 45 }; // lower angle = head up on this axis (opposite of what its number suggests)
+  moveServosTogether(names, upTarget, 1, 70, 14); // slow, deliberate stretch upward
+
+  idleHold(1000, false, true, true, true, true); // hold at full stretch -- doesn't touch neck2/neck3 or the eyes, so all stay free
+
+  const int homeTarget[] = { 90 };
+  moveServosTogether(names, homeTarget, 1, 70, 12);
+}
+
+// ============================================================
+// Sleepy droop
+// Eyelids ease to a heavy half-closed squint and the head droops
+// slightly, like a moment of drowsiness, then eases back up. No jaw
+// movement (unlike the yawn) and no sound. Type "sleepy" into the
+// Serial Monitor to trigger it.
+// ============================================================
+void sleepyBlinkAnimation() {
+  const char* names[] = { "eyelidRight", "eyelidLeft", "neck1" };
+  const int droopTargets[] = { 49, 105, 100 }; // heavy-lidded squint (same halfway points as the yawn), slight downward droop -- higher angle = head down on this axis
+
+  moveServosTogether(names, droopTargets, 3, 30, 25); // slow, heavy-lidded ease
+
+  idleHold(1600, false, true, true, true, true); // hold the droop -- doesn't touch neck2/neck3 or the eyes, so all stay free
+
+  const int homeTargets[] = { 58, 96, 90 };
+  moveServosTogether(names, homeTargets, 3, 25, 20);
 }
 
 // ============================================================
@@ -1145,8 +1255,13 @@ AnimationFunc idleAnimations[] = {
   curiousTiltAnimation,
   yawnAnimation,
   lookAroundAnimation,
-  flinchAnimation,
   lookAndHoldAnimation,
+  quickChompsAnimation,
+  bigTiltAnimation,
+  neckStretchAnimation,
+  sleepyBlinkAnimation,
+  shakeAnimation,
+  shakeChompAnimation,
 };
 const uint8_t NUM_IDLE_ANIMATIONS = sizeof(idleAnimations) / sizeof(idleAnimations[0]);
 
@@ -1156,8 +1271,13 @@ void printIdleAnimationName(uint8_t idx) {
     case 0: Serial.println(F("tilt")); break;
     case 1: Serial.println(F("yawn")); break;
     case 2: Serial.println(F("look around")); break;
-    case 3: Serial.println(F("flinch")); break;
-    case 4: Serial.println(F("look hold")); break;
+    case 3: Serial.println(F("look hold")); break;
+    case 4: Serial.println(F("chomp")); break;
+    case 5: Serial.println(F("big tilt")); break;
+    case 6: Serial.println(F("look up")); break;
+    case 7: Serial.println(F("sleepy")); break;
+    case 8: Serial.println(F("shake")); break;
+    case 9: Serial.println(F("shake chomp")); break;
     default: Serial.println(F("?")); break;
   }
 }
@@ -1346,15 +1466,15 @@ void idleAnimation() {
 
 // ============================================================
 // Shared command table
-// Every one of these 14 animations used to get triggered by its own
+// Each of these animations used to get triggered by its own
 // hand-written block in BOTH handleSerialCommands() ("print a message,
 // call it, print another message") and test1Animation() ("print its
-// name, call it, pause") -- 28 nearly-identical blocks differing only
+// name, call it, pause") -- nearly-identical blocks differing only
 // in which string/function they used. Centralizing that here means
 // the actual dispatch/smoke-test logic exists once in each function,
 // looped over this table, instead of duplicated per command. Strings
 // are PROGMEM, same reasoning as F() everywhere else in this sketch --
-// a table of 42 plain string literals would otherwise cost real RAM
+// a table of plain string literals would otherwise cost real RAM
 // just for existing.
 // ============================================================
 const char cmdName0[]  PROGMEM = "blink";
@@ -1366,11 +1486,16 @@ const char cmdName5[]  PROGMEM = "front";
 const char cmdName6[]  PROGMEM = "tilt";
 const char cmdName7[]  PROGMEM = "yawn";
 const char cmdName8[]  PROGMEM = "look around";
-const char cmdName9[]  PROGMEM = "flinch";
-const char cmdName10[] PROGMEM = "look hold";
-const char cmdName11[] PROGMEM = "eyes closed";
-const char cmdName12[] PROGMEM = "eyes open";
-const char cmdName13[] PROGMEM = "clip5";
+const char cmdName9[]  PROGMEM = "look hold";
+const char cmdName10[] PROGMEM = "eyes closed";
+const char cmdName11[] PROGMEM = "eyes open";
+const char cmdName12[] PROGMEM = "clip5";
+const char cmdName13[] PROGMEM = "chomp";
+const char cmdName14[] PROGMEM = "big tilt";
+const char cmdName15[] PROGMEM = "look up";
+const char cmdName16[] PROGMEM = "sleepy";
+const char cmdName17[] PROGMEM = "shake";
+const char cmdName18[] PROGMEM = "shake chomp";
 
 const char cmdStart0[]  PROGMEM = "Blinking...";
 const char cmdStart1[]  PROGMEM = "Roaring...";
@@ -1381,11 +1506,16 @@ const char cmdStart5[]  PROGMEM = "Returning to front...";
 const char cmdStart6[]  PROGMEM = "Tilting head...";
 const char cmdStart7[]  PROGMEM = "Yawning...";
 const char cmdStart8[]  PROGMEM = "Looking around...";
-const char cmdStart9[]  PROGMEM = "Flinching...";
-const char cmdStart10[] PROGMEM = "Looking and holding...";
-const char cmdStart11[] PROGMEM = "Closing eyes...";
-const char cmdStart12[] PROGMEM = "Opening eyes...";
-const char cmdStart13[] PROGMEM = "Playing clip5...";
+const char cmdStart9[]  PROGMEM = "Looking and holding...";
+const char cmdStart10[] PROGMEM = "Closing eyes...";
+const char cmdStart11[] PROGMEM = "Opening eyes...";
+const char cmdStart12[] PROGMEM = "Playing clip5...";
+const char cmdStart13[] PROGMEM = "Chomping...";
+const char cmdStart14[] PROGMEM = "Big tilt...";
+const char cmdStart15[] PROGMEM = "Looking up...";
+const char cmdStart16[] PROGMEM = "Getting sleepy...";
+const char cmdStart17[] PROGMEM = "Shaking...";
+const char cmdStart18[] PROGMEM = "Shake chomping...";
 
 const char cmdDone0[]  PROGMEM = "Blink done.";
 const char cmdDone1[]  PROGMEM = "Roar done.";
@@ -1396,11 +1526,16 @@ const char cmdDone5[]  PROGMEM = "Front done.";
 const char cmdDone6[]  PROGMEM = "Tilt done.";
 const char cmdDone7[]  PROGMEM = "Yawn done.";
 const char cmdDone8[]  PROGMEM = "Look around done.";
-const char cmdDone9[]  PROGMEM = "Flinch done.";
-const char cmdDone10[] PROGMEM = "Look hold done.";
-const char cmdDone11[] PROGMEM = "Eyes closed.";
-const char cmdDone12[] PROGMEM = "Eyes open.";
-const char cmdDone13[] PROGMEM = "Clip5 done.";
+const char cmdDone9[]  PROGMEM = "Look hold done.";
+const char cmdDone10[] PROGMEM = "Eyes closed.";
+const char cmdDone11[] PROGMEM = "Eyes open.";
+const char cmdDone12[] PROGMEM = "Clip5 done.";
+const char cmdDone13[] PROGMEM = "Chomp done.";
+const char cmdDone14[] PROGMEM = "Big tilt done.";
+const char cmdDone15[] PROGMEM = "Look up done.";
+const char cmdDone16[] PROGMEM = "Sleepy done.";
+const char cmdDone17[] PROGMEM = "Shake done.";
+const char cmdDone18[] PROGMEM = "Shake chomp done.";
 
 struct SerialCommand {
   const char* name;     // PROGMEM pointer
@@ -1419,11 +1554,16 @@ const SerialCommand serialCommands[] = {
   { cmdName6,  cmdStart6,  cmdDone6,  curiousTiltAnimation },
   { cmdName7,  cmdStart7,  cmdDone7,  yawnAnimation },
   { cmdName8,  cmdStart8,  cmdDone8,  lookAroundAnimation },
-  { cmdName9,  cmdStart9,  cmdDone9,  flinchAnimation },
-  { cmdName10, cmdStart10, cmdDone10, lookAndHoldAnimation },
-  { cmdName11, cmdStart11, cmdDone11, eyesClosedAnimation },
-  { cmdName12, cmdStart12, cmdDone12, eyesOpenAnimation },
-  { cmdName13, cmdStart13, cmdDone13, clip5Animation },
+  { cmdName9,  cmdStart9,  cmdDone9,  lookAndHoldAnimation },
+  { cmdName10, cmdStart10, cmdDone10, eyesClosedAnimation },
+  { cmdName11, cmdStart11, cmdDone11, eyesOpenAnimation },
+  { cmdName12, cmdStart12, cmdDone12, clip5Animation },
+  { cmdName13, cmdStart13, cmdDone13, quickChompsAnimation },
+  { cmdName14, cmdStart14, cmdDone14, bigTiltAnimation },
+  { cmdName15, cmdStart15, cmdDone15, neckStretchAnimation },
+  { cmdName16, cmdStart16, cmdDone16, sleepyBlinkAnimation },
+  { cmdName17, cmdStart17, cmdDone17, shakeAnimation },
+  { cmdName18, cmdStart18, cmdDone18, shakeChompAnimation },
 };
 const uint8_t NUM_SERIAL_COMMANDS = sizeof(serialCommands) / sizeof(serialCommands[0]);
 

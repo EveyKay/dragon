@@ -41,7 +41,7 @@ Older sketches in `archive/` and `experiments/` are plain `.ino` files kept for 
 | `eyelidRight` | 5 | 90 | 60–120 | — | |
 | `jaw` | 6 | 90 | 15–120 | — | |
 | `neck1` | 7 | 90 | 30–150 | — | up/down |
-| `neck2` | 8 | 90 | 30–150 | +15° | side-to-side sway |
+| `neck2` | 8 | 90 | 20–165 | +15° | side-to-side sway |
 | `neck3` | 9 | 90 | 30–150 | +10° | side-to-side sway |
 
 Channels, home angles, safe ranges, and trims are all defined in one place at the top of the sketch (`servoConfigs[]`), so rewiring a servo to a different channel or changing its limits doesn't require touching the animation code below it. `trim` corrects small per-servo mechanical differences (e.g. a horn seated slightly off) by nudging the actual PWM output while every animation still just thinks in terms of "90 = centered" — nothing outside `moveServo()` needs to know a trim exists.
@@ -61,8 +61,13 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 - `tilt` — curious head tilt to a random side (neck2/neck3 lean, eyes glance the same way), no sound
 - `yawn` — slow silent yawn/stretch: jaw opens wide, eyelids squint, neck leans back
 - `look around` — scanning sweep: eyes/neck to one side, across to the other, back to center, no sound
-- `flinch` — quick startled snap: neck back, eyelids wide, brief hold, no sound
 - `look hold` — turns to a random side and lingers there for 5–12s before returning, unlike `look around`'s quick sweep, no sound
+- `chomp` — three quick, shallow jaw snaps, like stretching the jaw, no sound
+- `big tilt` — neck2 leans almost to its full safe range (with only a little follow-through on neck3) with a longer hold, no sound
+- `look up` — neck cranes upward and holds, like sniffing the air, no sound
+- `sleepy` — eyelids ease to a heavy half-closed squint with a slight downward droop, no sound
+- `shake` — neck2 swings between its two safe extremes a few times, like a head shake, paced to stay under the speed cap, no sound
+- `shake chomp` — eyes close, then neck2 shakes and the jaw does quick little chomps at the same time, like shaking something in its mouth, no sound
 - `clip5` — servo motion generated from [`sounds/clip_05.mp3`](sounds/clip_05.mp3)'s volume envelope (see below)
 - `idle` — ambient idle mode: continuous neck sway, regular blinking, occasional bigger animations and "freeze" pauses, all randomized, no sound (see below); type anything to stop it
 - `scan` — diagnostic: cycles PCA9685 channels 0–15, wiggling and announcing each one, for figuring out physical wiring on an unlabeled board
@@ -92,7 +97,7 @@ If a speaker swap still isn't loud enough, the next step up is a small external 
 
 - **Ambient sway** — `neck1`/`neck2`/`neck3` sway continuously, each on a different period so the combined motion doesn't look like a robotic uniform wobble.
 - **Regular blinking** — every 3–6 seconds, independent of everything else.
-- **Bigger animations** — every 10–20 seconds, one of `tilt` / `yawn` / `look around` / `flinch` / `look hold` fires. Deliberately excludes "stateful" animations (`eyes closed`, `look right`/`look left`) that move somewhere and stay, since a random pick landing on one of those and not revisiting it for a while would look broken rather than alive.
+- **Bigger animations** — every 10–20 seconds, one of `tilt` / `yawn` / `look around` / `look hold` / `chomp` / `big tilt` / `look up` / `sleepy` / `shake` / `shake chomp` fires. Deliberately excludes "stateful" animations (`eyes closed`, `look right`/`look left`) that move somewhere and stay, since a random pick landing on one of those and not revisiting it for a while would look broken rather than alive. Also excludes `flinch`, which was removed after the servos would occasionally seize up on its fast startle snap.
 - **Freezes** — every 6–10 seconds (between the blink and big-animation cadence), the sway eases down to a dead stop for 2–4 seconds, then eases back up — just a moment of stillness before it keeps moving.
 
 The sway doesn't actually stop while a blink or bigger animation plays — `moveServosTogether()` drives whichever neck axis a given call isn't already using itself (at full amplitude under a blink, since blinking never touches the neck; at a lessened amplitude under a bigger animation, since that one *is* actively steering some of those axes). This only activates while idle mode has set a global flag, so it's a no-op for any animation triggered directly from the Serial Monitor.
@@ -116,6 +121,6 @@ To generate a new one from another clip: run the file through a high-pass + FFT 
 | 11 | `ror two` (alternate roar) |
 | 12 | `eyes closed` / `eyes open`, `test1` smoke-test command |
 | 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw` was mounted reversed at the time); logical angle tracked in code instead of read back from the servo |
-| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly |
+| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly; added a hard per-servo speed cap; `flinch` removed after its fast startle snap kept making the servos seize up, replaced in the idle pool by `chomp`, `big tilt`, `look up`, and `sleepy` |
 
 All prior versions are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference.
