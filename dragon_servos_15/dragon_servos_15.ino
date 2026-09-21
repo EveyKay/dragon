@@ -182,10 +182,11 @@ void moveServo(const char* name, int angle, bool capSpeed = true) {
 float easeInOutExpo(float t, float steepness = 20.0) {
   if (t <= 0.0) return 0.0;
   if (t >= 1.0) return 1.0;
+  const float ln2 = 0.6931472;
   if (t < 0.5) {
-    return 0.5 * pow(2.0, steepness * t - steepness / 2.0);
+    return 0.5 * expf((steepness * t - steepness / 2.0) * ln2);
   } else {
-    return 1.0 - 0.5 * pow(2.0, -steepness * t + steepness / 2.0);
+    return 1.0 - 0.5 * expf((-steepness * t + steepness / 2.0) * ln2);
   }
 }
 
@@ -523,6 +524,7 @@ void rorAnimation() {
 
   for (int i = 0; i <= steps; i++) {
     float t = (float)i / steps; // 0.0 -> 1.0 across the whole animation
+    bool isFinalStep = (i == steps); // bypasses the speed cap so this loop always actually lands exactly on its targets, not just close
 
     // Neck moves faster than the rest of the animation: it finishes
     // its travel by the 35% mark, then holds at its end angle.
@@ -583,12 +585,12 @@ void rorAnimation() {
       neck3Angle = 90;
     }
 
-    moveServo("neck1", neckAngle);
-    moveServo("neck2", neck2Angle);
-    moveServo("neck3", neck3Angle);
-    moveServo("jaw", jawAngle);
-    moveServo("eyelidRight", rightAngle);
-    moveServo("eyelidLeft", leftAngle);
+    moveServo("neck1", neckAngle, !isFinalStep);
+    moveServo("neck2", neck2Angle, !isFinalStep);
+    moveServo("neck3", neck3Angle, !isFinalStep);
+    moveServo("jaw", jawAngle, !isFinalStep);
+    moveServo("eyelidRight", rightAngle, !isFinalStep);
+    moveServo("eyelidLeft", leftAngle, !isFinalStep);
 
     delay(stepDelayMs);
   }
@@ -607,10 +609,10 @@ void rorAnimation() {
     for (int i = 0; i <= wobbleSteps; i++) {
       float t = easeInOutExpo((float)i / wobbleSteps);
       int jawAngle = wobbleLow + t * (wobbleHigh - wobbleLow);
-      moveServo("jaw", jawAngle);
+      moveServo("jaw", jawAngle, i != wobbleSteps);
 
       float neckT = easeInOutExpo((float)wobbleSubStep / (totalWobbleSubSteps - 1));
-      moveServo("neck1", neckEnd + neckT * (90 - neckEnd));
+      moveServo("neck1", neckEnd + neckT * (90 - neckEnd), wobbleSubStep != totalWobbleSubSteps - 1);
       wobbleSubStep++;
 
       delay(wobbleStepDelayMs);
@@ -619,10 +621,10 @@ void rorAnimation() {
     for (int i = 0; i <= wobbleSteps; i++) {
       float t = easeInOutExpo((float)i / wobbleSteps);
       int jawAngle = wobbleHigh + t * (wobbleLow - wobbleHigh);
-      moveServo("jaw", jawAngle);
+      moveServo("jaw", jawAngle, i != wobbleSteps);
 
       float neckT = easeInOutExpo((float)wobbleSubStep / (totalWobbleSubSteps - 1));
-      moveServo("neck1", neckEnd + neckT * (90 - neckEnd));
+      moveServo("neck1", neckEnd + neckT * (90 - neckEnd), wobbleSubStep != totalWobbleSubSteps - 1);
       wobbleSubStep++;
 
       delay(wobbleStepDelayMs);
@@ -640,10 +642,16 @@ void rorAnimation() {
   for (int i = 0; i <= returnSteps; i++) {
     float t = easeInOutExpo((float)i / returnSteps);
     int jawAngle = jawFrom + t * (homeAngle - jawFrom);
-    moveServo("jaw", jawAngle);
-    moveServo("neck1", homeAngle);
-    moveServo("eyelidRight", rightOpen);
-    moveServo("eyelidLeft", leftOpen);
+    // This loop's 4ms-per-step pace is fast enough that the speed cap
+    // engages hard through the curve's steep middle -- exactly what was
+    // leaving the jaw open after "ror". Bypassing the cap on only the
+    // guaranteed-exact final step (same fix as moveServosTogether())
+    // means it always actually reaches fully closed.
+    bool isFinalStep = (i == returnSteps);
+    moveServo("jaw", jawAngle, !isFinalStep);
+    moveServo("neck1", homeAngle, !isFinalStep);
+    moveServo("eyelidRight", rightOpen, !isFinalStep);
+    moveServo("eyelidLeft", leftOpen, !isFinalStep);
     delay(returnStepDelayMs);
   }
 }
@@ -887,6 +895,7 @@ void ror2Animation() {
 
   for (int i = 0; i <= steps; i++) {
     float t = (float)i / steps;
+    bool isFinalStep = (i == steps); // bypasses the speed cap so this loop always actually lands on 90, the same fix rorAnimation() needed
 
     float wave = center + amplitude * cos(2 * PI * cycles * t);
     int neckAngle = (int)(wave + 0.5);
@@ -910,10 +919,10 @@ void ror2Animation() {
       }
     }
 
-    moveServo("neck1", neckAngle);
-    moveServo("jaw", jawAngle);
-    moveServo("eyelidRight", rightAngle);
-    moveServo("eyelidLeft", leftAngle);
+    moveServo("neck1", neckAngle, !isFinalStep);
+    moveServo("jaw", jawAngle, !isFinalStep);
+    moveServo("eyelidRight", rightAngle, !isFinalStep);
+    moveServo("eyelidLeft", leftAngle, !isFinalStep);
 
     delay(stepDelayMs);
   }
@@ -1336,6 +1345,89 @@ void idleAnimation() {
 }
 
 // ============================================================
+// Shared command table
+// Every one of these 14 animations used to get triggered by its own
+// hand-written block in BOTH handleSerialCommands() ("print a message,
+// call it, print another message") and test1Animation() ("print its
+// name, call it, pause") -- 28 nearly-identical blocks differing only
+// in which string/function they used. Centralizing that here means
+// the actual dispatch/smoke-test logic exists once in each function,
+// looped over this table, instead of duplicated per command. Strings
+// are PROGMEM, same reasoning as F() everywhere else in this sketch --
+// a table of 42 plain string literals would otherwise cost real RAM
+// just for existing.
+// ============================================================
+const char cmdName0[]  PROGMEM = "blink";
+const char cmdName1[]  PROGMEM = "ror";
+const char cmdName2[]  PROGMEM = "ror two";
+const char cmdName3[]  PROGMEM = "look right";
+const char cmdName4[]  PROGMEM = "look left";
+const char cmdName5[]  PROGMEM = "front";
+const char cmdName6[]  PROGMEM = "tilt";
+const char cmdName7[]  PROGMEM = "yawn";
+const char cmdName8[]  PROGMEM = "look around";
+const char cmdName9[]  PROGMEM = "flinch";
+const char cmdName10[] PROGMEM = "look hold";
+const char cmdName11[] PROGMEM = "eyes closed";
+const char cmdName12[] PROGMEM = "eyes open";
+const char cmdName13[] PROGMEM = "clip5";
+
+const char cmdStart0[]  PROGMEM = "Blinking...";
+const char cmdStart1[]  PROGMEM = "Roaring...";
+const char cmdStart2[]  PROGMEM = "Roaring (take two)...";
+const char cmdStart3[]  PROGMEM = "Looking right...";
+const char cmdStart4[]  PROGMEM = "Looking left...";
+const char cmdStart5[]  PROGMEM = "Returning to front...";
+const char cmdStart6[]  PROGMEM = "Tilting head...";
+const char cmdStart7[]  PROGMEM = "Yawning...";
+const char cmdStart8[]  PROGMEM = "Looking around...";
+const char cmdStart9[]  PROGMEM = "Flinching...";
+const char cmdStart10[] PROGMEM = "Looking and holding...";
+const char cmdStart11[] PROGMEM = "Closing eyes...";
+const char cmdStart12[] PROGMEM = "Opening eyes...";
+const char cmdStart13[] PROGMEM = "Playing clip5...";
+
+const char cmdDone0[]  PROGMEM = "Blink done.";
+const char cmdDone1[]  PROGMEM = "Roar done.";
+const char cmdDone2[]  PROGMEM = "Ror two done.";
+const char cmdDone3[]  PROGMEM = "Look right done.";
+const char cmdDone4[]  PROGMEM = "Look left done.";
+const char cmdDone5[]  PROGMEM = "Front done.";
+const char cmdDone6[]  PROGMEM = "Tilt done.";
+const char cmdDone7[]  PROGMEM = "Yawn done.";
+const char cmdDone8[]  PROGMEM = "Look around done.";
+const char cmdDone9[]  PROGMEM = "Flinch done.";
+const char cmdDone10[] PROGMEM = "Look hold done.";
+const char cmdDone11[] PROGMEM = "Eyes closed.";
+const char cmdDone12[] PROGMEM = "Eyes open.";
+const char cmdDone13[] PROGMEM = "Clip5 done.";
+
+struct SerialCommand {
+  const char* name;     // PROGMEM pointer
+  const char* startMsg; // PROGMEM pointer
+  const char* doneMsg;  // PROGMEM pointer
+  AnimationFunc func;
+};
+
+const SerialCommand serialCommands[] = {
+  { cmdName0,  cmdStart0,  cmdDone0,  blinkEyelids },
+  { cmdName1,  cmdStart1,  cmdDone1,  rorAnimation },
+  { cmdName2,  cmdStart2,  cmdDone2,  ror2Animation },
+  { cmdName3,  cmdStart3,  cmdDone3,  lookRightAnimation },
+  { cmdName4,  cmdStart4,  cmdDone4,  lookLeftAnimation },
+  { cmdName5,  cmdStart5,  cmdDone5,  frontAnimation },
+  { cmdName6,  cmdStart6,  cmdDone6,  curiousTiltAnimation },
+  { cmdName7,  cmdStart7,  cmdDone7,  yawnAnimation },
+  { cmdName8,  cmdStart8,  cmdDone8,  lookAroundAnimation },
+  { cmdName9,  cmdStart9,  cmdDone9,  flinchAnimation },
+  { cmdName10, cmdStart10, cmdDone10, lookAndHoldAnimation },
+  { cmdName11, cmdStart11, cmdDone11, eyesClosedAnimation },
+  { cmdName12, cmdStart12, cmdDone12, eyesOpenAnimation },
+  { cmdName13, cmdStart13, cmdDone13, clip5Animation },
+};
+const uint8_t NUM_SERIAL_COMMANDS = sizeof(serialCommands) / sizeof(serialCommands[0]);
+
+// ============================================================
 // Test 1
 // Runs every named animation currently in the system, one after
 // another, with about a 3 second pause between each. Handy for
@@ -1343,62 +1435,14 @@ void idleAnimation() {
 // safe ranges. Type "test1" into the Serial Monitor.
 // ============================================================
 void test1Animation() {
-  Serial.println(F("[test1] blink"));
-  blinkEyelids();
-  delay(3000);
-
-  Serial.println(F("[test1] ror"));
-  rorAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] ror two"));
-  ror2Animation();
-  delay(3000);
-
-  Serial.println(F("[test1] look right"));
-  lookRightAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] look left"));
-  lookLeftAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] front"));
-  frontAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] tilt"));
-  curiousTiltAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] yawn"));
-  yawnAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] look around"));
-  lookAroundAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] flinch"));
-  flinchAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] look hold"));
-  lookAndHoldAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] eyes closed"));
-  eyesClosedAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] eyes open"));
-  eyesOpenAnimation();
-  delay(3000);
-
-  Serial.println(F("[test1] clip5"));
-  clip5Animation();
-  delay(3000);
-
+  char nameBuf[16];
+  for (uint8_t i = 0; i < NUM_SERIAL_COMMANDS; i++) {
+    strcpy_P(nameBuf, serialCommands[i].name);
+    Serial.print(F("[test1] "));
+    Serial.println(nameBuf);
+    serialCommands[i].func();
+    delay(3000);
+  }
   Serial.println(F("[test1] complete"));
 }
 
@@ -1439,102 +1483,20 @@ void handleSerialCommands() {
     return;
   }
 
-  if (strcasecmp(line, "blink") == 0) {
-    Serial.println(F("Blinking..."));
-    blinkEyelids();
-    Serial.println(F("Blink done."));
-    return;
-  }
-
-  if (strcasecmp(line, "ror") == 0) {
-    Serial.println(F("Roaring..."));
-    rorAnimation();
-    Serial.println(F("Roar done."));
-    return;
-  }
-
-  if (strcasecmp(line, "ror two") == 0) {
-    Serial.println(F("Roaring (take two)..."));
-    ror2Animation();
-    Serial.println(F("Ror two done."));
-    return;
-  }
-
-  if (strcasecmp(line, "look right") == 0) {
-    Serial.println(F("Looking right..."));
-    lookRightAnimation();
-    Serial.println(F("Look right done."));
-    return;
-  }
-
-  if (strcasecmp(line, "look left") == 0) {
-    Serial.println(F("Looking left..."));
-    lookLeftAnimation();
-    Serial.println(F("Look left done."));
-    return;
-  }
-
-  if (strcasecmp(line, "front") == 0) {
-    Serial.println(F("Returning to front..."));
-    frontAnimation();
-    Serial.println(F("Front done."));
-    return;
-  }
-
-  if (strcasecmp(line, "tilt") == 0) {
-    Serial.println(F("Tilting head..."));
-    curiousTiltAnimation();
-    Serial.println(F("Tilt done."));
-    return;
-  }
-
-  if (strcasecmp(line, "yawn") == 0) {
-    Serial.println(F("Yawning..."));
-    yawnAnimation();
-    Serial.println(F("Yawn done."));
-    return;
-  }
-
-  if (strcasecmp(line, "look around") == 0) {
-    Serial.println(F("Looking around..."));
-    lookAroundAnimation();
-    Serial.println(F("Look around done."));
-    return;
-  }
-
-  if (strcasecmp(line, "flinch") == 0) {
-    Serial.println(F("Flinching..."));
-    flinchAnimation();
-    Serial.println(F("Flinch done."));
-    return;
-  }
-
-  if (strcasecmp(line, "look hold") == 0) {
-    Serial.println(F("Looking and holding..."));
-    lookAndHoldAnimation();
-    Serial.println(F("Look hold done."));
-    return;
-  }
-
-  if (strcasecmp(line, "eyes closed") == 0) {
-    Serial.println(F("Closing eyes..."));
-    eyesClosedAnimation();
-    Serial.println(F("Eyes closed."));
-    return;
-  }
-
-  if (strcasecmp(line, "eyes open") == 0) {
-    Serial.println(F("Opening eyes..."));
-    eyesOpenAnimation();
-    Serial.println(F("Eyes open."));
-    return;
-  }
-
-  if (strcasecmp(line, "clip5") == 0) {
-    Serial.println(F("Playing clip5..."));
-    clip5Animation();
-    Serial.println(F("Clip5 done."));
-    return;
+  {
+    char nameBuf[16];
+    for (uint8_t i = 0; i < NUM_SERIAL_COMMANDS; i++) {
+      strcpy_P(nameBuf, serialCommands[i].name);
+      if (strcasecmp(line, nameBuf) == 0) {
+        char msgBuf[26];
+        strcpy_P(msgBuf, serialCommands[i].startMsg);
+        Serial.println(msgBuf);
+        serialCommands[i].func();
+        strcpy_P(msgBuf, serialCommands[i].doneMsg);
+        Serial.println(msgBuf);
+        return;
+      }
+    }
   }
 
   if (strncasecmp(line, "play ", 5) == 0) {
