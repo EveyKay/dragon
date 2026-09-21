@@ -121,6 +121,27 @@ float idleSwayScale = 1.0; // 1.0 = full idle sway, smaller = lessened during a 
 bool idleSwayPhaseFrozen = false;
 unsigned long idleSwayFrozenElapsed = 0;
 
+// Amplitude (degrees) and period (ms, full cycle) per neck axis.
+// Re-randomized periodically by randomizeSwayVariance() -- always at
+// a moment idleSwayScale is at/near 0 (right after a resync or a
+// freeze ends), so changing these never causes a visible jump, since
+// amplitude*sin(anything) contributes ~nothing at that instant
+// regardless of what the new values are.
+float neck1SwayAmplitude = 14, neck2SwayAmplitude = 10, neck3SwayAmplitude = 7;
+float neck1SwayPeriodMs = 4000, neck2SwayPeriodMs = 5500, neck3SwayPeriodMs = 7000;
+
+void randomizeSwayVariance() {
+  neck1SwayAmplitude = random(18, 30);
+  neck2SwayAmplitude = random(14, 24);
+  neck3SwayAmplitude = random(10, 18);
+  // Widened range -- was 6000-11000/8000-13000/10000-15000, which
+  // kept the pace fairly similar reroll to reroll. This spans all
+  // the way from noticeably brisk to quite lazy.
+  neck1SwayPeriodMs = random(3500, 14000);
+  neck2SwayPeriodMs = random(5000, 17000);
+  neck3SwayPeriodMs = random(6500, 20000);
+}
+
 bool servoInGroup(const char* name, const char* names[], int count) {
   for (int i = 0; i < count; i++) {
     if (strcmp(name, names[i]) == 0) return true;
@@ -134,9 +155,9 @@ bool servoInGroup(const char* name, const char* names[], int count) {
 void applyIdleSway(bool doNeck1, bool doNeck2, bool doNeck3) {
   if (!idleSwayActive) return;
   unsigned long elapsed = idleSwayPhaseFrozen ? idleSwayFrozenElapsed : (millis() - idleSwayStartMillis);
-  if (doNeck1) moveServo("neck1", 90 + idleSwayScale * 14 * sin(2 * PI * elapsed / 4000.0));
-  if (doNeck2) moveServo("neck2", 90 + idleSwayScale * 10 * sin(2 * PI * elapsed / 5500.0));
-  if (doNeck3) moveServo("neck3", 90 + idleSwayScale * 7 * sin(2 * PI * elapsed / 7000.0));
+  if (doNeck1) moveServo("neck1", 90 + idleSwayScale * neck1SwayAmplitude * sin(2 * PI * elapsed / neck1SwayPeriodMs));
+  if (doNeck2) moveServo("neck2", 90 + idleSwayScale * neck2SwayAmplitude * sin(2 * PI * elapsed / neck2SwayPeriodMs));
+  if (doNeck3) moveServo("neck3", 90 + idleSwayScale * neck3SwayAmplitude * sin(2 * PI * elapsed / neck3SwayPeriodMs));
 }
 
 // Move a named servo to an angle, clamped to its configured safe range.
@@ -637,12 +658,19 @@ void flinchAnimation() {
   const char* names[] = { "neck1", "eyelidRight", "eyelidLeft" };
   const int startleTargets[] = { 130, 78, 76 }; // wide eyes: further open than the normal resting position
 
-  // Stretching the duration alone couldn't keep up once
-  // easeInOutExpo()'s default curve got steeper -- peak velocity
-  // scales with steepness, not just total time, so this needs its
-  // own much gentler curve (steepness 10 vs. the default 28) rather
-  // than another round of more steps/more delay.
-  moveServosTogether(names, startleTargets, 3, 35, 16, 10.0);
+  // Fixed step counts assume neck1 starts near 90 -- fine when this
+  // is triggered directly, but idle mode's ambient sway can leave
+  // neck1 anywhere in its +/-14 degree range at the moment this
+  // fires, so the real distance can run noticeably longer than the
+  // ~40 degrees this was tuned around. Scaling steps (and therefore
+  // total duration) to the actual distance, the same way
+  // moveServoSmooth() already does, keeps peak velocity bounded no
+  // matter where it starts from, instead of always cramming whatever
+  // the distance turns out to be into the same fixed time budget.
+  int neck1Distance = abs(startleTargets[0] - lastAngle[servoIndex("neck1")]);
+  if (neck1Distance < 1) neck1Distance = 1;
+  const int msPerDegree = 14; // calibrated pace -- keeps peak velocity safe regardless of start position
+  moveServosTogether(names, startleTargets, 3, neck1Distance, msPerDegree, 10.0);
 
   delay(250); // brief startled hold
 
@@ -921,7 +949,12 @@ void scanChannels() {
 // The neck sways continuously in the background -- a different
 // period on each of the three neck servos so the combined motion
 // doesn't look like a robotic uniform wobble, closer to how a real
-// animal never holds perfectly still -- while the eyelids blink
+// animal never holds perfectly still. The amplitude and period of
+// that sway are re-randomized by randomizeSwayVariance() every time
+// there's a safe moment to do it invisibly (idleSwayScale already at
+// 0: after a resync, or right as a freeze ends), so the sway itself
+// keeps drifting in size and pace over time instead of being one
+// fixed repeating pattern. Meanwhile the eyelids blink
 // regularly (every 3-6 seconds) and a bigger animation from the pool
 // below fires every 10-20 seconds. blinkEyelids() isn't in that pool
 // since the regular blinking already covers it; the pool is reserved
@@ -969,6 +1002,7 @@ void idleAnimation() {
   idleSwayActive = true;
   idleSwayStartMillis = millis();
   idleSwayScale = 1.0;
+  randomizeSwayVariance();
 
   // 30ms (instead of the original 100ms) gives ~20 intermediate steps
   // across the 600ms freeze fade instead of just 6, which was coarse
@@ -988,6 +1022,7 @@ void idleAnimation() {
   long nextFreezeAt = random(6000, 10000);
   long freezeStartedAt = -1; // -1 = not currently frozen
   long freezeDurationMs = 0;
+  bool freezeVarianceRerolled = false; // makes sure the reroll below only fires once per freeze
 
   while (!Serial.available()) {
     if (freezeStartedAt >= 0 && sinceResync - freezeStartedAt >= freezeDurationMs) {
@@ -1003,6 +1038,7 @@ void idleAnimation() {
     if (freezeStartedAt < 0 && sinceResync >= nextFreezeAt) {
       freezeStartedAt = sinceResync;
       freezeDurationMs = random(2000, 4000);
+      freezeVarianceRerolled = false;
 
       // Snapshot the current phase and hold it fixed for the whole
       // freeze (fade-down, hold, and fade-up) -- only the amplitude
@@ -1029,6 +1065,17 @@ void idleAnimation() {
         idleSwayScale = easeInOutExpo(t);
       } else {
         idleSwayScale = 0.0;
+
+        // This is the only genuinely safe moment to reroll during a
+        // freeze -- the fade-up (above) already brings scale back to
+        // ~1.0 *before* "freeze ended" is detected, so rerolling at
+        // that boundary (an earlier bug) was changing the pattern at
+        // full amplitude, not zero, and it showed as a visible jump.
+        // Here, scale is actually 0, so it's invisible.
+        if (!freezeVarianceRerolled) {
+          randomizeSwayVariance();
+          freezeVarianceRerolled = true;
+        }
       }
     } else {
       idleSwayScale = (sinceResync < fadeMs) ? easeInOutExpo((float)sinceResync / fadeMs) : 1.0;
@@ -1054,6 +1101,7 @@ void idleAnimation() {
 
       // Resync to a clean baseline before the next ambient fade-in.
       moveServosTogether(neckNames, neckHome, 3, 20, 10);
+      randomizeSwayVariance(); // safe here too -- the next fade-in starts from scale 0
 
       sinceResync = 0;
       nextBlinkAt = random(3000, 6000);
