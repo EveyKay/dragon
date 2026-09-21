@@ -58,6 +58,10 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 - `ror two` — alternate roar: neck/jaw bob through two cycles with a mid-blink, paired with [`sounds/ror_two.mp3`](sounds/ror_two.mp3) (a single bark from a longer recording, sped up 1.5x and duplicated so its two peaks land exactly on this animation's two mouth-fully-open instants)
 - `look right` / `look left` / `front` — eyes and lower neck turn together, or reset to center
 - `eyes closed` / `eyes open` — eyelids to fully closed/open
+- `tilt` — curious head tilt to a random side (neck2/neck3 lean, eyes glance the same way), no sound
+- `yawn` — slow silent yawn/stretch: jaw opens wide, eyelids squint, neck leans back
+- `look around` — scanning sweep: eyes/neck to one side, across to the other, back to center, no sound
+- `flinch` — quick startled snap: neck back, eyelids wide, brief hold, no sound
 - `clip5` — servo motion generated from [`sounds/clip_05.mp3`](sounds/clip_05.mp3)'s volume envelope (see below)
 - `scan` — diagnostic: cycles PCA9685 channels 0–15, wiggling and announcing each one, for figuring out physical wiring on an unlabeled board
 - `test1` — runs every animation above in sequence, for a quick smoke test after rewiring
@@ -97,6 +101,6 @@ To generate a new one from another clip: run the file through a high-pass + FFT 
 | 11 | `ror two` (alternate roar) |
 | 12 | `eyes closed` / `eyes open`, `test1` smoke-test command |
 | 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw` was mounted reversed at the time); logical angle tracked in code instead of read back from the servo |
-| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection |
+| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added four sound-free animations (`tilt`, `yawn`, `look around`, `flinch`) |
 
 All prior versions are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference.
