@@ -62,7 +62,9 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 - `yawn` — slow silent yawn/stretch: jaw opens wide, eyelids squint, neck leans back
 - `look around` — scanning sweep: eyes/neck to one side, across to the other, back to center, no sound
 - `flinch` — quick startled snap: neck back, eyelids wide, brief hold, no sound
+- `look hold` — turns to a random side and lingers there for 5–12s before returning, unlike `look around`'s quick sweep, no sound
 - `clip5` — servo motion generated from [`sounds/clip_05.mp3`](sounds/clip_05.mp3)'s volume envelope (see below)
+- `idle` — ambient idle mode: continuous neck sway, regular blinking, occasional bigger animations and "freeze" pauses, all randomized, no sound (see below); type anything to stop it
 - `scan` — diagnostic: cycles PCA9685 channels 0–15, wiggling and announcing each one, for figuring out physical wiring on an unlabeled board
 - `test1` — runs every animation above in sequence, for a quick smoke test after rewiring
 
@@ -84,6 +86,19 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 
 If a speaker swap still isn't loud enough, the next step up is a small external amplifier (e.g. a PAM8403-based board) between the DFPlayer's line-level output and the speaker, bypassing the onboard amp's power ceiling entirely.
 
+### Idle mode
+
+`idleAnimation()` (the `idle` command) is meant to make the dragon look alive with no operator input and no sound — the long-term plan is a physical button wired to trigger this, alongside separate "off" and "full random including sound" buttons. It layers several independent, randomly-timed behaviors:
+
+- **Ambient sway** — `neck1`/`neck2`/`neck3` sway continuously, each on a different period so the combined motion doesn't look like a robotic uniform wobble.
+- **Regular blinking** — every 3–6 seconds, independent of everything else.
+- **Bigger animations** — every 10–20 seconds, one of `tilt` / `yawn` / `look around` / `flinch` / `look hold` fires. Deliberately excludes "stateful" animations (`eyes closed`, `look right`/`look left`) that move somewhere and stay, since a random pick landing on one of those and not revisiting it for a while would look broken rather than alive.
+- **Freezes** — every 6–10 seconds (between the blink and big-animation cadence), the sway eases down to a dead stop for 2–4 seconds, then eases back up — just a moment of stillness before it keeps moving.
+
+The sway doesn't actually stop while a blink or bigger animation plays — `moveServosTogether()` drives whichever neck axis a given call isn't already using itself (at full amplitude under a blink, since blinking never touches the neck; at a lessened amplitude under a bigger animation, since that one *is* actively steering some of those axes). This only activates while idle mode has set a global flag, so it's a no-op for any animation triggered directly from the Serial Monitor.
+
+Getting the freeze to not look jerky took a couple of real fixes worth knowing about if this code gets touched again: the sway's amplitude fades smoothly using the same exponential ease as everything else, but the sine wave's *phase* has to be explicitly frozen too (snapshotted at freeze start, resumed from exactly that point at freeze end) — otherwise the phase keeps advancing invisibly underneath a purely amplitude-based fade, and resuming can land on a fast-moving part of the cycle that fights the ramp-up. There was also a sign error where the fade-*out of* a freeze was computing time-remaining instead of progress-into-the-ramp, so it counted the wrong direction and re-zeroed itself right as the freeze ended.
+
 ### Sound-synced animations
 
 `clip5Animation()` isn't hand-timed like the others — it's generated from the actual volume envelope of a recording. The audio is sampled in 40ms slices; the jaw and neck1 angles for each slice are derived directly from how loud that slice is, so the mouth snaps open and the head dips on every bark and eases back on the quiet stretches between them. The eyelids get one quick blink at the recording's single loudest instant. The per-frame angle tables live in the sketch itself (`clip5Jaw[]` / `clip5Neck1[]`); the source audio is kept in [`sounds/`](sounds/) for reference and for future resyncing if a sound module gets added.
@@ -101,6 +116,6 @@ To generate a new one from another clip: run the file through a high-pass + FFT 
 | 11 | `ror two` (alternate roar) |
 | 12 | `eyes closed` / `eyes open`, `test1` smoke-test command |
 | 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw` was mounted reversed at the time); logical angle tracked in code instead of read back from the servo |
-| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added four sound-free animations (`tilt`, `yawn`, `look around`, `flinch`) |
+| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly |
 
 All prior versions are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference.
