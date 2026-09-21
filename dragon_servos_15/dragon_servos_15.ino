@@ -91,6 +91,23 @@ const uint8_t NUM_SERVOS = sizeof(servoConfigs) / sizeof(servoConfigs[0]);
 // moveServosTogether() both read from this instead of a live sensor.
 int lastAngle[NUM_SERVOS];
 
+// Timestamp of the last commanded move for each servo, used by
+// moveServo()'s hard speed cap below to know how much time actually
+// elapsed since the previous command.
+unsigned long lastMoveMillis[NUM_SERVOS];
+
+// Hard ceiling on how many degrees any servo is ever allowed to move
+// per millisecond, enforced unconditionally in moveServo() itself --
+// unlike the eased curves (which shape a well-behaved move), this is
+// the backstop that catches a bad steepness value, a curve's own peak
+// spike, or any future bug that tries to slam a servo across a big
+// distance in one tick, and silently slows the actual commanded angle
+// down to this rate instead. 0.2 deg/ms is comfortably under standard
+// hobby servo slew rates even under mechanical load, well past the
+// safety margin flinchAnimation() alone needed after several rounds of
+// tuning.
+const float MAX_DEGREES_PER_MS = 0.2;
+
 // Look up a servo's array index by its friendly name.
 // Returns -1 if not found.
 int servoIndex(const char* name) {
@@ -100,6 +117,44 @@ int servoIndex(const char* name) {
     }
   }
   return -1;
+}
+
+// Move a named servo to an angle, clamped to its configured safe range.
+// capSpeed defaults on for every normal call, enforcing
+// MAX_DEGREES_PER_MS regardless of what asked for the move; setup()
+// passes false for the very first, one-time snap to each servo's home
+// position at boot, since there's no known prior position to safely
+// ramp from there anyway (the PCA9685 can't report where a servo
+// actually is), and the cap would otherwise mistake "no boot history"
+// for a real starting position of 0 and immediately clip that first
+// move to almost nothing.
+void moveServo(const char* name, int angle, bool capSpeed = true) {
+  int idx = servoIndex(name);
+  if (idx == -1) {
+    Serial.print(F("Unknown servo: "));
+    Serial.println(name);
+    return;
+  }
+  angle = constrain(angle, servoConfigs[idx].minAngle, servoConfigs[idx].maxAngle);
+
+  unsigned long now = millis();
+  if (capSpeed) {
+    unsigned long elapsedMs = now - lastMoveMillis[idx];
+    int maxDelta = (int)(MAX_DEGREES_PER_MS * elapsedMs);
+    if (maxDelta < 1) maxDelta = 1;
+    int delta = angle - lastAngle[idx];
+    if (delta > maxDelta) angle = lastAngle[idx] + maxDelta;
+    else if (delta < -maxDelta) angle = lastAngle[idx] - maxDelta;
+  }
+  lastMoveMillis[idx] = now; // always refreshed, even when this particular call skipped the cap, so the next call's elapsed time is measured from here
+
+  lastAngle[idx] = angle; // logical angle, untrimmed -- everything else in the
+                          // sketch (sway math, blinks, min/max clamps) keeps
+                          // working in this same "90 = center" space
+
+  int physicalAngle = constrain(angle + servoConfigs[idx].trim, 0, 180);
+  int ticks = map(physicalAngle, 0, 180, SERVO_MIN_TICKS, SERVO_MAX_TICKS);
+  pwm.setPWM(servoConfigs[idx].channel, 0, ticks);
 }
 
 // Eases a linear progress value (0.0-1.0) into an exponential
@@ -113,10 +168,18 @@ int servoIndex(const char* name) {
 // the same total duration (roughly proportional to steepness itself,
 // not just to total time), which is why stretching a movement's
 // duration can't fully compensate for a steeper curve. The default
-// (28) is used everywhere except flinchAnimation()'s snap-in, which
-// needed a much gentler curve to stay within what the servos could
-// track on a large, fast move.
-float easeInOutExpo(float t, float steepness = 28.0) {
+// (20) is used everywhere except flinchAnimation(), which pins both
+// of its moves to explicit steepness values (8 for the snap-in, 28
+// for the ease back out) so it stays exactly as calibrated regardless
+// of this default.
+//
+// This used to go as high as 60, which crammed nearly all of a move's
+// travel into a narrow sliver of time near the middle -- MAX_DEGREES_PER_MS
+// below is what actually keeps that (or any curve) from commanding a
+// servo faster than it can physically track, so this default is free
+// to just be picked for how the motion looks rather than doubling as
+// the only thing standing between a steep curve and a strained motor.
+float easeInOutExpo(float t, float steepness = 20.0) {
   if (t <= 0.0) return 0.0;
   if (t >= 1.0) return 1.0;
   if (t < 0.5) {
@@ -160,12 +223,13 @@ void randomizeSwayVariance() {
   neck1SwayAmplitude = random(18, 30);
   neck2SwayAmplitude = random(14, 24);
   neck3SwayAmplitude = random(10, 18);
-  // Widened range -- was 6000-11000/8000-13000/10000-15000, which
-  // kept the pace fairly similar reroll to reroll. This spans all
-  // the way from noticeably brisk to quite lazy.
-  neck1SwayPeriodMs = random(3500, 14000);
-  neck2SwayPeriodMs = random(5000, 17000);
-  neck3SwayPeriodMs = random(6500, 20000);
+  // Widened again -- was 3500-14000/5000-17000/6500-20000. Pushing the
+  // fast end quicker and the slow end lazier spreads the pace out
+  // further reroll to reroll, so consecutive swings can differ sharply
+  // in speed instead of drifting only moderately.
+  neck1SwayPeriodMs = random(2000, 20000);
+  neck2SwayPeriodMs = random(3000, 24000);
+  neck3SwayPeriodMs = random(4000, 28000);
 }
 
 bool servoInGroup(const char* name, const char* names[], int count) {
@@ -175,15 +239,33 @@ bool servoInGroup(const char* name, const char* names[], int count) {
   return false;
 }
 
+// A back-and-forth oscillation between -amplitude and +amplitude, one
+// full round trip every periodMs -- built out of easeInOutExpo() itself
+// (ping-ponging between the two extremes) instead of a raw sin(), so
+// the continuous neck sway shares the exact same curve and steepness
+// knob as every point-to-point move in the sketch, rather than being
+// the one motion that never actually ran through it. Takes its
+// steepness from easeInOutExpo()'s own default rather than a second
+// copy of the number, so the two can never drift out of sync.
+float easedOscillate(float elapsedMs, float periodMs, float amplitude) {
+  float halfPeriod = periodMs / 2.0;
+  float legPhase = fmod(elapsedMs, periodMs) / halfPeriod; // 0..2: which leg of the round trip, and how far into it
+  if (legPhase < 1.0) {
+    return -amplitude + easeInOutExpo(legPhase) * (2.0 * amplitude); // -amplitude -> +amplitude
+  } else {
+    return amplitude - easeInOutExpo(legPhase - 1.0) * (2.0 * amplitude); // +amplitude -> -amplitude
+  }
+}
+
 // Drives whichever of neck1/neck2/neck3 are passed as true -- callers
 // pass false for any axis a bigger animation is actively controlling
 // itself, so the two motions never fight over the same servo.
 void applyIdleSway(bool doNeck1, bool doNeck2, bool doNeck3) {
   if (!idleSwayActive) return;
   unsigned long elapsed = idleSwayPhaseFrozen ? idleSwayFrozenElapsed : (millis() - idleSwayStartMillis);
-  if (doNeck1) moveServo("neck1", 90 + idleSwayScale * neck1SwayAmplitude * sin(2 * PI * elapsed / neck1SwayPeriodMs));
-  if (doNeck2) moveServo("neck2", 90 + idleSwayScale * neck2SwayAmplitude * sin(2 * PI * elapsed / neck2SwayPeriodMs));
-  if (doNeck3) moveServo("neck3", 90 + idleSwayScale * neck3SwayAmplitude * sin(2 * PI * elapsed / neck3SwayPeriodMs));
+  if (doNeck1) moveServo("neck1", 90 + idleSwayScale * easedOscillate(elapsed, neck1SwayPeriodMs, neck1SwayAmplitude));
+  if (doNeck2) moveServo("neck2", 90 + idleSwayScale * easedOscillate(elapsed, neck2SwayPeriodMs, neck2SwayAmplitude));
+  if (doNeck3) moveServo("neck3", 90 + idleSwayScale * easedOscillate(elapsed, neck3SwayPeriodMs, neck3SwayAmplitude));
 }
 
 // ============================================================
@@ -213,22 +295,22 @@ void applyIdleGaze(bool doEyeLeft, bool doEyeRight) {
   if (doEyeRight) moveServo("eyeRight", angle);
 }
 
-// Move a named servo to an angle, clamped to its configured safe range.
-void moveServo(const char* name, int angle) {
-  int idx = servoIndex(name);
-  if (idx == -1) {
-    Serial.print(F("Unknown servo: "));
-    Serial.println(name);
-    return;
+// Holds still for durationMs -- used in place of a plain delay() during
+// an animation's pose-hold, so whichever neck/eye axes that animation
+// isn't using stay free to keep swaying/glancing underneath instead of
+// freezing solid for the hold's duration. A flat delay() was exactly
+// what curiousTiltAnimation()/yawnAnimation()/lookAroundAnimation()/
+// flinchAnimation() used to do here, which is why the ambient motion
+// looked like it stopped in lockstep with each animation instead of
+// continuing through it.
+void idleHold(long durationMs, bool doNeck1, bool doNeck2, bool doNeck3, bool doEyeLeft, bool doEyeRight) {
+  const int stepMs = 20; // was 50 -- finer sampling keeps the steep sway curve looking like motion instead of a pop
+  for (long waited = 0; waited < durationMs; waited += stepMs) {
+    if (Serial.available()) return;
+    applyIdleSway(doNeck1, doNeck2, doNeck3);
+    applyIdleGaze(doEyeLeft, doEyeRight);
+    delay(stepMs);
   }
-  angle = constrain(angle, servoConfigs[idx].minAngle, servoConfigs[idx].maxAngle);
-  lastAngle[idx] = angle; // logical angle, untrimmed -- everything else in the
-                          // sketch (sway math, blinks, min/max clamps) keeps
-                          // working in this same "90 = center" space
-
-  int physicalAngle = constrain(angle + servoConfigs[idx].trim, 0, 180);
-  int ticks = map(physicalAngle, 0, 180, SERVO_MIN_TICKS, SERVO_MAX_TICKS);
-  pwm.setPWM(servoConfigs[idx].channel, 0, ticks);
 }
 
 // Smoothly ease a single named servo from wherever it currently is
@@ -253,7 +335,15 @@ void moveServoSmooth(const char* name, int targetAngle) {
   for (int i = 0; i <= steps; i++) {
     float t = easeInOutExpo((float)i / steps);
     int angle = startAngle + t * (clampedTarget - startAngle);
-    moveServo(name, angle);
+    // The final step (t == 1.0, angle == clampedTarget exactly) skips
+    // the speed cap -- if an earlier step got throttled by it partway
+    // through the steepest part of the curve, the position can end up
+    // trailing a few degrees behind where the curve says it should be,
+    // and nothing else ever asks it to close that gap. Letting only
+    // this last, guaranteed-exact step bypass the cap means the move
+    // always actually finishes at its real target instead of settling
+    // short of it.
+    moveServo(name, angle, i != steps);
     delay(stepDelayMs);
   }
 }
@@ -268,7 +358,7 @@ void setup() {
   pwm.setPWMFreq(50); // standard hobby servo frequency
 
   for (uint8_t i = 0; i < NUM_SERVOS; i++) {
-    moveServo(servoConfigs[i].name, servoConfigs[i].homeAngle);
+    moveServo(servoConfigs[i].name, servoConfigs[i].homeAngle, false); // one-time boot snap -- no known prior position to cap speed against
 
     Serial.print(F("Attached '"));
     Serial.print(servoConfigs[i].name);
@@ -385,8 +475,8 @@ void blinkEyelids() {
     float t = easeInOutExpo((float)i / steps); // 0.0 -> 1.0
     int rightAngle = rightOpen + t * (rightClosed - rightOpen);
     int leftAngle = leftOpen + t * (leftClosed - leftOpen);
-    moveServo("eyelidRight", rightAngle);
-    moveServo("eyelidLeft", leftAngle);
+    moveServo("eyelidRight", rightAngle, i != steps); // last step bypasses the speed cap so a closing blink always actually reaches fully closed
+    moveServo("eyelidLeft", leftAngle, i != steps);
     applyIdleSway(true, true, true); // blink never touches the neck or eyeballs, so all stay free
     applyIdleGaze(true, true);
     delay(stepDelayMs);
@@ -397,8 +487,8 @@ void blinkEyelids() {
     float t = easeInOutExpo((float)i / steps);
     int rightAngle = rightClosed + t * (rightOpen - rightClosed);
     int leftAngle = leftClosed + t * (leftOpen - leftClosed);
-    moveServo("eyelidRight", rightAngle);
-    moveServo("eyelidLeft", leftAngle);
+    moveServo("eyelidRight", rightAngle, i != steps); // last step bypasses the speed cap so an opening blink always actually reaches fully open
+    moveServo("eyelidLeft", leftAngle, i != steps);
     applyIdleSway(true, true, true);
     applyIdleGaze(true, true);
     delay(stepDelayMs);
@@ -565,7 +655,7 @@ void rorAnimation() {
 // ============================================================
 const uint8_t MAX_GROUP_SERVOS = 8;
 
-void moveServosTogether(const char* names[], const int targets[], int count, int steps, int stepDelayMs, float easeSteepness = 28.0) {
+void moveServosTogether(const char* names[], const int targets[], int count, int steps, int stepDelayMs, float easeSteepness = 20.0) {
   int startAngles[MAX_GROUP_SERVOS];
   for (int c = 0; c < count; c++) {
     int idx = servoIndex(names[c]);
@@ -583,9 +673,20 @@ void moveServosTogether(const char* names[], const int targets[], int count, int
 
   for (int i = 0; i <= steps; i++) {
     float t = easeInOutExpo((float)i / steps, easeSteepness);
+    bool isFinalStep = (i == steps);
     for (int c = 0; c < count; c++) {
       int angle = startAngles[c] + t * (targets[c] - startAngles[c]);
-      moveServo(names[c], angle);
+      // Last step (t == 1.0, angle == the real target) bypasses the
+      // speed cap -- if the cap throttled an earlier, steeper step, the
+      // commanded position can trail a few degrees behind the curve's
+      // intended one, and nothing downstream ever asks it to close that
+      // gap on its own. This is exactly what left the jaw open after a
+      // yawn: the cap clipped its fast middle section, and by the last
+      // step it was still a few degrees short of home with nothing left
+      // to push it the rest of the way. Bypassing the cap on only this
+      // guaranteed-exact final step means every move still actually
+      // finishes at its real target.
+      moveServo(names[c], angle, !isFinalStep);
     }
     applyIdleSway(freeNeck1, freeNeck2, freeNeck3);
     applyIdleGaze(freeEyeLeft, freeEyeRight);
@@ -635,7 +736,7 @@ void curiousTiltAnimation() {
   const int leanTargets[] = { neck2Tilt, neck3Tilt, eyeTilt, eyeTilt };
   moveServosTogether(names, leanTargets, 4, 60, 12);
 
-  delay(700); // hold the curious pose for a moment
+  idleHold(700, true, false, false, false, false); // hold the curious pose -- neck1 is the only axis this animation doesn't use, so it's the only one free to keep swaying
 
   const int homeTargets[] = { 90, 90, 90, 90 };
   moveServosTogether(names, homeTargets, 4, 60, 12);
@@ -653,7 +754,7 @@ void yawnAnimation() {
   const int openTargets[] = { 25, 110, 49, 105 }; // squint: halfway between each eye's open and closed
   moveServosTogether(names, openTargets, 4, 90, 14); // slow -- a yawn isn't rushed
 
-  delay(600); // hold at the peak of the yawn
+  idleHold(600, false, true, true, true, true); // hold at the peak -- a yawn never touches neck2/neck3 or the eyes, so all of those stay free
 
   const int homeTargets[] = { 90, 90, 58, 96 };
   moveServosTogether(names, homeTargets, 4, 70, 12);
@@ -671,11 +772,11 @@ void lookAroundAnimation() {
 
   const int rightTargets[] = { 140, 140, 125, 125 };
   moveServosTogether(names, rightTargets, 4, 90, 14); // slow sweep to one side
-  delay(400); // brief pause, like taking in what's there
+  idleHold(400, true, false, false, false, false); // brief pause, like taking in what's there -- neck1 is the only free axis here
 
   const int leftTargets[] = { 40, 40, 55, 55 };
   moveServosTogether(names, leftTargets, 4, 130, 12); // slower sweep across to the other side
-  delay(400);
+  idleHold(400, true, false, false, false, false);
 
   const int frontTargets[] = { 90, 90, 90, 90 };
   moveServosTogether(names, frontTargets, 4, 80, 10); // settle back to center
@@ -703,13 +804,19 @@ void flinchAnimation() {
   // the distance turns out to be into the same fixed time budget.
   int neck1Distance = abs(startleTargets[0] - lastAngle[servoIndex("neck1")]);
   if (neck1Distance < 1) neck1Distance = 1;
-  const int msPerDegree = 14; // calibrated pace -- keeps peak velocity safe regardless of start position
-  moveServosTogether(names, startleTargets, 3, neck1Distance, msPerDegree, 10.0);
+  // Both the pace and the curve are pinned well clear of the shared
+  // default (see easeInOutExpo()) and slowed down further on top of
+  // that -- this is the one motion in the whole sketch fast/sharp
+  // enough that the servos have visibly struggled with it before, so
+  // it stays deliberately conservative no matter how aggressive the
+  // curve gets everywhere else.
+  const int msPerDegree = 18; // was 14 -- more time per degree of travel
+  moveServosTogether(names, startleTargets, 3, neck1Distance, msPerDegree, 8.0); // was steepness 10.0
 
-  delay(250); // brief startled hold
+  idleHold(250, false, true, true, true, true); // brief startled hold -- flinch never touches neck2/neck3 or the eyes, so all of those stay free
 
   const int homeTargets[] = { 90, 58, 96 };
-  moveServosTogether(names, homeTargets, 3, 40, 12); // ease back out, slower than the snap in
+  moveServosTogether(names, homeTargets, 3, 40, 12, 28.0); // ease back out, slower than the snap in -- pinned to the old default so raising it elsewhere doesn't change flinch at all
 }
 
 // ============================================================
@@ -1034,6 +1141,18 @@ AnimationFunc idleAnimations[] = {
 };
 const uint8_t NUM_IDLE_ANIMATIONS = sizeof(idleAnimations) / sizeof(idleAnimations[0]);
 
+void printIdleAnimationName(uint8_t idx) {
+  Serial.print(F("[idle] "));
+  switch (idx) {
+    case 0: Serial.println(F("tilt")); break;
+    case 1: Serial.println(F("yawn")); break;
+    case 2: Serial.println(F("look around")); break;
+    case 3: Serial.println(F("flinch")); break;
+    case 4: Serial.println(F("look hold")); break;
+    default: Serial.println(F("?")); break;
+  }
+}
+
 void idleAnimation() {
   Serial.println(F("Entering idle mode -- type anything to stop."));
 
@@ -1050,11 +1169,14 @@ void idleAnimation() {
   idleGazeMoveStartMillis = millis();
   long nextGazeShiftAt = random(1500, 4000);
 
-  // 30ms (instead of the original 100ms) gives ~20 intermediate steps
-  // across the 600ms freeze fade instead of just 6, which was coarse
-  // enough to feel like discrete little jumps rather than one smooth
-  // motion.
-  const int swayStepMs = 30;
+  // 15ms (instead of the original 100ms, then 30ms) gives ~40
+  // intermediate steps across the 600ms freeze fade instead of just 6,
+  // which was coarse enough to feel like discrete little jumps rather
+  // than one smooth motion -- tightened further alongside the easing
+  // curve's steepness, since a steeper curve concentrates real
+  // movement into an even narrower time window that coarser sampling
+  // would just turn back into a pop.
+  const int swayStepMs = 15;
   const long fadeMs = 1500;    // fade the ambient sway in after each resync
   const long freezeFadeMs = 600; // fade the sway down into a freeze, and back up out of one
 
@@ -1146,10 +1268,29 @@ void idleAnimation() {
     if (sinceResync >= nextBigAnimationAt) {
       // Lessen (not stop) the sway -- moveServosTogether() inside
       // whichever animation runs will keep driving any neck axis it
-      // isn't using itself, at this reduced amplitude.
+      // isn't using itself, at this reduced amplitude. Ease down into
+      // that reduced amplitude instead of snapping straight to it --
+      // the sway's sine wave has a real position at every instant, so
+      // stepping idleSwayScale from ~1.0 to 0.7 in one tick would jump
+      // that position immediately (unless the phase happened to be
+      // crossing zero right then), the same kind of discontinuity the
+      // freeze fade was built to avoid.
+      const long swayDampMs = 400;
+      float dampStartScale = idleSwayScale;
+      unsigned long dampStartMillis = millis();
+      while (millis() - dampStartMillis < (unsigned long)swayDampMs) {
+        if (Serial.available()) break;
+        float dampT = easeInOutExpo((float)(millis() - dampStartMillis) / swayDampMs);
+        idleSwayScale = dampStartScale + dampT * (0.7 - dampStartScale);
+        applyIdleSway(true, true, true);
+        applyIdleGaze(true, true);
+        delay(swayStepMs);
+      }
       idleSwayScale = 0.7;
+      if (Serial.available()) break;
 
       uint8_t idx = random(0, NUM_IDLE_ANIMATIONS);
+      printIdleAnimationName(idx);
       idleAnimations[idx](); // fires from wherever neck2/neck3 currently are
 
       if (Serial.available()) break;
