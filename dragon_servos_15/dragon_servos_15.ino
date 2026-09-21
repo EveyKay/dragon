@@ -104,7 +104,7 @@ int servoIndex(const char* name) {
 void moveServo(const char* name, int angle) {
   int idx = servoIndex(name);
   if (idx == -1) {
-    Serial.print("Unknown servo: ");
+    Serial.print(F("Unknown servo: "));
     Serial.println(name);
     return;
   }
@@ -125,7 +125,7 @@ void moveServo(const char* name, int angle) {
 void moveServoSmooth(const char* name, int targetAngle) {
   int idx = servoIndex(name);
   if (idx == -1) {
-    Serial.print("Unknown servo: ");
+    Serial.print(F("Unknown servo: "));
     Serial.println(name);
     return;
   }
@@ -148,6 +148,8 @@ void moveServoSmooth(const char* name, int targetAngle) {
 void setup() {
   Serial.begin(9600);
 
+  randomSeed(analogRead(A0)); // A0 is unconnected -- floating-pin noise seeds curiousTiltAnimation()'s side pick
+
   Wire.begin();
   pwm.begin();
   pwm.setPWMFreq(50); // standard hobby servo frequency
@@ -155,24 +157,24 @@ void setup() {
   for (uint8_t i = 0; i < NUM_SERVOS; i++) {
     moveServo(servoConfigs[i].name, servoConfigs[i].homeAngle);
 
-    Serial.print("Attached '");
+    Serial.print(F("Attached '"));
     Serial.print(servoConfigs[i].name);
-    Serial.print("' on PCA9685 channel ");
+    Serial.print(F("' on PCA9685 channel "));
     Serial.print(servoConfigs[i].channel);
-    Serial.print(" (home angle ");
+    Serial.print(F(" (home angle "));
     Serial.print(servoConfigs[i].homeAngle);
-    Serial.println(")");
+    Serial.println(F(")"));
   }
 
-  Serial.println("Dragon servo setup complete.");
+  Serial.println(F("Dragon servo setup complete."));
 
   dfSerial.begin(9600);
   if (dfPlayer.begin(dfSerial)) {
     dfPlayerReady = true;
     dfPlayer.volume(30); // 0 (silent) - 30 (loudest)
-    Serial.println("DFPlayer ready.");
+    Serial.println(F("DFPlayer ready."));
   } else {
-    Serial.println("DFPlayer not found -- check wiring and SD card.");
+    Serial.println(F("DFPlayer not found -- check wiring and SD card."));
   }
 }
 
@@ -487,6 +489,93 @@ void frontAnimation() {
 }
 
 // ============================================================
+// Curious head tilt
+// Neck2/neck3 lean together to one side (picked at random each
+// time) with a slight curve, while the eyes glance toward the same
+// side -- like a dog or cat tilting its head at something curious.
+// Holds the pose briefly, then eases back to center. No sound.
+// Type "tilt" into the Serial Monitor to trigger it.
+// ============================================================
+void curiousTiltAnimation() {
+  bool tiltRight = random(0, 2) == 0; // picks a side at random each time
+
+  const int neck2Tilt = tiltRight ? 130 : 50;
+  const int neck3Tilt = tiltRight ? 115 : 65;
+  const int eyeTilt = tiltRight ? 140 : 40;
+
+  const char* names[] = { "neck2", "neck3", "eyeLeft", "eyeRight" };
+  const int leanTargets[] = { neck2Tilt, neck3Tilt, eyeTilt, eyeTilt };
+  moveServosTogether(names, leanTargets, 4, 60, 12);
+
+  delay(700); // hold the curious pose for a moment
+
+  const int homeTargets[] = { 90, 90, 90, 90 };
+  moveServosTogether(names, homeTargets, 4, 60, 12);
+}
+
+// ============================================================
+// Silent yawn/stretch
+// Jaw opens slowly and wide, eyelids squint halfway toward closed,
+// neck1 leans back a little -- a lazy stretch moment. No sound,
+// unlike the roar animations that also open the jaw wide.
+// Type "yawn" into the Serial Monitor to trigger it.
+// ============================================================
+void yawnAnimation() {
+  const char* names[] = { "jaw", "neck1", "eyelidRight", "eyelidLeft" };
+  const int openTargets[] = { 25, 110, 49, 105 }; // squint: halfway between each eye's open and closed
+  moveServosTogether(names, openTargets, 4, 90, 14); // slow -- a yawn isn't rushed
+
+  delay(600); // hold at the peak of the yawn
+
+  const int homeTargets[] = { 90, 90, 58, 96 };
+  moveServosTogether(names, homeTargets, 4, 70, 12);
+}
+
+// ============================================================
+// Scanning look-around
+// Eyes sweep from one side to the other and back, with neck2/neck3
+// following a little, before settling back to front -- an alert,
+// watchful moment. No sound.
+// Type "look around" into the Serial Monitor to trigger it.
+// ============================================================
+void lookAroundAnimation() {
+  const char* names[] = { "eyeLeft", "eyeRight", "neck2", "neck3" };
+
+  const int rightTargets[] = { 140, 140, 125, 125 };
+  moveServosTogether(names, rightTargets, 4, 90, 14); // slow sweep to one side
+  delay(400); // brief pause, like taking in what's there
+
+  const int leftTargets[] = { 40, 40, 55, 55 };
+  moveServosTogether(names, leftTargets, 4, 130, 12); // slower sweep across to the other side
+  delay(400);
+
+  const int frontTargets[] = { 90, 90, 90, 90 };
+  moveServosTogether(names, frontTargets, 4, 80, 10); // settle back to center
+}
+
+// ============================================================
+// Startled flinch
+// A quick, sharp snap: neck jerks back and eyelids pop wider open,
+// like something surprised it. Fast in, brief hold, eases back out
+// slower than it snapped in. No sound.
+// Type "flinch" into the Serial Monitor to trigger it.
+// ============================================================
+void flinchAnimation() {
+  const char* names[] = { "neck1", "eyelidRight", "eyelidLeft" };
+  const int startleTargets[] = { 130, 78, 76 }; // wide eyes: further open than the normal resting position
+
+  // 15 steps/4ms (60ms total) was too fast for the servos to keep up
+  // with cleanly on a ~40 degree move -- 25 steps/10ms is still a
+  // sharp snap but within what they can actually track.
+  moveServosTogether(names, startleTargets, 3, 25, 10);
+
+  delay(250); // brief startled hold
+
+  const int homeTargets[] = { 90, 58, 96 };
+  moveServosTogether(names, homeTargets, 3, 40, 12); // ease back out, slower than the snap in
+}
+
+// ============================================================
 // Ror two
 // neck1 and jaw both bob smoothly between 90 (up/closed) and 20
 // (down/open), completing two full cycles together — so the head
@@ -696,7 +785,7 @@ void scanChannels() {
   const int wiggleTicks = 30; // ~12 degrees each way -- safe for every configured servo
 
   for (uint8_t ch = 0; ch < 16; ch++) {
-    Serial.print("Channel ");
+    Serial.print(F("Channel "));
     Serial.println(ch);
 
     pwm.setPWM(ch, 0, midTicks - wiggleTicks);
@@ -707,7 +796,7 @@ void scanChannels() {
     delay(1500);
   }
 
-  Serial.println("Scan complete.");
+  Serial.println(F("Scan complete."));
 }
 
 // ============================================================
@@ -718,43 +807,59 @@ void scanChannels() {
 // safe ranges. Type "test1" into the Serial Monitor.
 // ============================================================
 void test1Animation() {
-  Serial.println("[test1] blink");
+  Serial.println(F("[test1] blink"));
   blinkEyelids();
   delay(3000);
 
-  Serial.println("[test1] ror");
+  Serial.println(F("[test1] ror"));
   rorAnimation();
   delay(3000);
 
-  Serial.println("[test1] ror two");
+  Serial.println(F("[test1] ror two"));
   ror2Animation();
   delay(3000);
 
-  Serial.println("[test1] look right");
+  Serial.println(F("[test1] look right"));
   lookRightAnimation();
   delay(3000);
 
-  Serial.println("[test1] look left");
+  Serial.println(F("[test1] look left"));
   lookLeftAnimation();
   delay(3000);
 
-  Serial.println("[test1] front");
+  Serial.println(F("[test1] front"));
   frontAnimation();
   delay(3000);
 
-  Serial.println("[test1] eyes closed");
+  Serial.println(F("[test1] tilt"));
+  curiousTiltAnimation();
+  delay(3000);
+
+  Serial.println(F("[test1] yawn"));
+  yawnAnimation();
+  delay(3000);
+
+  Serial.println(F("[test1] look around"));
+  lookAroundAnimation();
+  delay(3000);
+
+  Serial.println(F("[test1] flinch"));
+  flinchAnimation();
+  delay(3000);
+
+  Serial.println(F("[test1] eyes closed"));
   eyesClosedAnimation();
   delay(3000);
 
-  Serial.println("[test1] eyes open");
+  Serial.println(F("[test1] eyes open"));
   eyesOpenAnimation();
   delay(3000);
 
-  Serial.println("[test1] clip5");
+  Serial.println(F("[test1] clip5"));
   clip5Animation();
   delay(3000);
 
-  Serial.println("[test1] complete");
+  Serial.println(F("[test1] complete"));
 }
 
 // ============================================================
@@ -777,65 +882,93 @@ void handleSerialCommands() {
   }
 
   if (line.equalsIgnoreCase("blink")) {
-    Serial.println("Blinking...");
+    Serial.println(F("Blinking..."));
     blinkEyelids();
-    Serial.println("Blink done.");
+    Serial.println(F("Blink done."));
     return;
   }
 
   if (line.equalsIgnoreCase("ror")) {
-    Serial.println("Roaring...");
+    Serial.println(F("Roaring..."));
     rorAnimation();
-    Serial.println("Roar done.");
+    Serial.println(F("Roar done."));
     return;
   }
 
   if (line.equalsIgnoreCase("ror two")) {
-    Serial.println("Roaring (take two)...");
+    Serial.println(F("Roaring (take two)..."));
     ror2Animation();
-    Serial.println("Ror two done.");
+    Serial.println(F("Ror two done."));
     return;
   }
 
   if (line.equalsIgnoreCase("look right")) {
-    Serial.println("Looking right...");
+    Serial.println(F("Looking right..."));
     lookRightAnimation();
-    Serial.println("Look right done.");
+    Serial.println(F("Look right done."));
     return;
   }
 
   if (line.equalsIgnoreCase("look left")) {
-    Serial.println("Looking left...");
+    Serial.println(F("Looking left..."));
     lookLeftAnimation();
-    Serial.println("Look left done.");
+    Serial.println(F("Look left done."));
     return;
   }
 
   if (line.equalsIgnoreCase("front")) {
-    Serial.println("Returning to front...");
+    Serial.println(F("Returning to front..."));
     frontAnimation();
-    Serial.println("Front done.");
+    Serial.println(F("Front done."));
+    return;
+  }
+
+  if (line.equalsIgnoreCase("tilt")) {
+    Serial.println(F("Tilting head..."));
+    curiousTiltAnimation();
+    Serial.println(F("Tilt done."));
+    return;
+  }
+
+  if (line.equalsIgnoreCase("yawn")) {
+    Serial.println(F("Yawning..."));
+    yawnAnimation();
+    Serial.println(F("Yawn done."));
+    return;
+  }
+
+  if (line.equalsIgnoreCase("look around")) {
+    Serial.println(F("Looking around..."));
+    lookAroundAnimation();
+    Serial.println(F("Look around done."));
+    return;
+  }
+
+  if (line.equalsIgnoreCase("flinch")) {
+    Serial.println(F("Flinching..."));
+    flinchAnimation();
+    Serial.println(F("Flinch done."));
     return;
   }
 
   if (line.equalsIgnoreCase("eyes closed")) {
-    Serial.println("Closing eyes...");
+    Serial.println(F("Closing eyes..."));
     eyesClosedAnimation();
-    Serial.println("Eyes closed.");
+    Serial.println(F("Eyes closed."));
     return;
   }
 
   if (line.equalsIgnoreCase("eyes open")) {
-    Serial.println("Opening eyes...");
+    Serial.println(F("Opening eyes..."));
     eyesOpenAnimation();
-    Serial.println("Eyes open.");
+    Serial.println(F("Eyes open."));
     return;
   }
 
   if (line.equalsIgnoreCase("clip5")) {
-    Serial.println("Playing clip5...");
+    Serial.println(F("Playing clip5..."));
     clip5Animation();
-    Serial.println("Clip5 done.");
+    Serial.println(F("Clip5 done."));
     return;
   }
 
@@ -843,35 +976,35 @@ void handleSerialCommands() {
   lowerLine.toLowerCase();
   if (lowerLine.startsWith("play ")) {
     if (!dfPlayerReady) {
-      Serial.println("DFPlayer not ready -- check wiring and SD card.");
+      Serial.println(F("DFPlayer not ready -- check wiring and SD card."));
       return;
     }
     int trackNum = line.substring(5).toInt();
     if (trackNum <= 0) {
-      Serial.println("Format: play <trackNumber>   e.g. play 5   (plays mp3/0005.mp3)");
+      Serial.println(F("Format: play <trackNumber>   e.g. play 5   (plays mp3/0005.mp3)"));
       return;
     }
-    Serial.print("Playing track ");
+    Serial.print(F("Playing track "));
     Serial.println(trackNum);
     dfPlayer.playMp3Folder(trackNum);
     return;
   }
 
   if (line.equalsIgnoreCase("scan")) {
-    Serial.println("Scanning channels 0-15...");
+    Serial.println(F("Scanning channels 0-15..."));
     scanChannels();
     return;
   }
 
   if (line.equalsIgnoreCase("test1")) {
-    Serial.println("Running test1 (all animations)...");
+    Serial.println(F("Running test1 (all animations)..."));
     test1Animation();
     return;
   }
 
   int spaceIndex = line.indexOf(' ');
   if (spaceIndex == -1) {
-    Serial.println("Format: <servoName> <angle>   e.g. jaw 60");
+    Serial.println(F("Format: <servoName> <angle>   e.g. jaw 60"));
     return;
   }
 
@@ -880,7 +1013,7 @@ void handleSerialCommands() {
   angleStr.trim();
 
   if (angleStr.length() == 0) {
-    Serial.println("Format: <servoName> <angle>   e.g. jaw 60");
+    Serial.println(F("Format: <servoName> <angle>   e.g. jaw 60"));
     return;
   }
 
@@ -888,12 +1021,12 @@ void handleSerialCommands() {
 
   int idx = servoIndex(name.c_str());
   if (idx == -1) {
-    Serial.print("Unknown servo: ");
+    Serial.print(F("Unknown servo: "));
     Serial.println(name);
-    Serial.print("Valid names: ");
+    Serial.print(F("Valid names: "));
     for (uint8_t i = 0; i < NUM_SERVOS; i++) {
       Serial.print(servoConfigs[i].name);
-      if (i < NUM_SERVOS - 1) Serial.print(", ");
+      if (i < NUM_SERVOS - 1) Serial.print(F(", "));
     }
     Serial.println();
     return;
@@ -902,7 +1035,7 @@ void handleSerialCommands() {
   moveServoSmooth(name.c_str(), angle);
 
   Serial.print(name);
-  Serial.print(" -> ");
+  Serial.print(F(" -> "));
   Serial.print(constrain(angle, servoConfigs[idx].minAngle, servoConfigs[idx].maxAngle));
-  Serial.println(" degrees");
+  Serial.println(F(" degrees"));
 }
