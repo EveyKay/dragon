@@ -16,22 +16,25 @@ The current sketch is set up as a [PlatformIO](https://platformio.org/) project 
 
 ```
 pio run              # compile
-pio run -t upload    # compile and flash to the Uno
+pio run -t upload    # compile and flash to the ESP32
 pio device monitor    # open the serial monitor at 9600 baud
 ```
+
+The sketch originally ran on an Arduino Uno; it was migrated to an ESP32 (see the version history below) for far more flash/RAM headroom, more GPIO for the planned physical buttons, and a free hardware UART for the DFPlayer instead of `SoftwareSerial`. The Uno version (and its `platformio.ini`) is still available in git history (commit `fe84b30` and earlier) if ever needed again.
 
 Older sketches in `archive/` and `experiments/` are plain `.ino` files kept for reference — they aren't part of the PlatformIO build and would need their own environment if compiled again.
 
 ## Wiring
 
-8 servos, driven through a **PCA9685 PWM driver board over I2C** rather than directly from the Arduino. Each servo plugs into its own channel on the PCA9685; the Arduino just sends it angle commands over I2C.
+8 servos, driven through a **PCA9685 PWM driver board over I2C** rather than directly from the microcontroller. Each servo plugs into its own channel on the PCA9685; the microcontroller just sends it angle commands over I2C.
 
-**Why not the `Servo` library directly:** that was the original design, but `Servo` relies on constant timer interrupts to hold every servo's position, which intermittently collided with `SoftwareSerial`'s interrupts for the DFPlayer — causing a glitch on a random servo after any sound-triggering command, and occasionally dropping the jaw (least torque margin) out entirely. Moving pulse generation to the PCA9685 removes the Arduino's timers from the picture, so there's nothing left for `SoftwareSerial` to collide with.
+**Why not the `Servo` library directly:** that was the original design (back on the Uno), but `Servo` relies on constant timer interrupts to hold every servo's position, which intermittently collided with `SoftwareSerial`'s interrupts for the DFPlayer — causing a glitch on a random servo after any sound-triggering command, and occasionally dropping the jaw (least torque margin) out entirely. Moving pulse generation to the PCA9685 removes the microcontroller's timers from the picture, so there's nothing left for serial communication to collide with.
 
-**PCA9685 wiring:**
-- `VCC` → Arduino `5V`, `GND` → Arduino `GND`, `SCL` → Arduino `A5`, `SDA` → Arduino `A4` (logic/I2C side)
-- `V+` (a separate screw terminal from the logic `VCC` pin) → the LM2596/battery rail, its `GND` → shared common ground — servos draw real current, so they're powered the same way the DFPlayer is, not from the Arduino
+**PCA9685 wiring (ESP32):**
+- `VCC` → ESP32 `3.3V`, `GND` → ESP32 `GND`, `SCL` → ESP32 `GPIO22`, `SDA` → ESP32 `GPIO21` (logic/I2C side)
+- `V+` (a separate screw terminal from the logic `VCC` pin) → the LM2596/battery rail, its `GND` → shared common ground — servos draw real current, so they're powered the same way the DFPlayer is, not from the microcontroller
 - Check for a jumper linking `VCC` and `V+` on your specific board and remove it if present — logic and servo power should stay electrically separate
+- **`VCC` must actually be 3.3V, not left on a 5V/battery source.** The PCA9685's I2C pins get pulled up to whatever powers its `VCC`, and ESP32 GPIOs are 3.3V-only (not 5V-tolerant) — feeding them a 5V-referenced I2C bus risks damaging those pins over time even if communication appears to work. This exact mistake (VCC wired to the battery rail alongside V+ instead of to the ESP32's 3.3V pin) caused a real "servos won't move" debugging session — worth double-checking directly with a meter if servos ever go completely unresponsive after rewiring.
 
 | Servo | PCA9685 channel | Home angle | Safe range | Trim | Notes |
 |---|---|---|---|---|---|
@@ -71,15 +74,17 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 - `clip5` — servo motion generated from [`sounds/clip_05.mp3`](sounds/clip_05.mp3)'s volume envelope (see below)
 - `idle` — ambient idle mode: continuous neck sway, regular blinking, occasional bigger animations and "freeze" pauses, all randomized, no sound (see below); type anything to stop it
 - `scan` — diagnostic: cycles PCA9685 channels 0–15, wiggling and announcing each one, for figuring out physical wiring on an unlabeled board
+- `stress test` — diagnostic: all 8 servos twitch ±12° around home in sync, back and forth, for as long as it runs -- the worst case for the shared servo power rail (every servo accelerates at once on every direction change), meant for reproducing/metering a power brownout rather than looking natural; type anything to stop it
 - `test1` — runs every animation above in sequence, for a quick smoke test after rewiring
 
 ### Sound module (DFPlayer Mini)
 
-- DFPlayer TX → Arduino pin 10, DFPlayer RX → Arduino pin 11 (`SoftwareSerial`)
-- DFPlayer VCC → the LM2596/battery rail (**not** the Arduino's 5V pin — its amp draws more current than the Arduino's own regulator can reliably supply, and starving it can brown out the whole board)
-- DFPlayer GND → shared with the Arduino and servo ground (all one common ground)
+- DFPlayer TX → ESP32 `GPIO32`, DFPlayer RX → ESP32 `GPIO33` — this is UART2, a real hardware serial port (the ESP32 has three independent UARTs, so unlike the Uno the DFPlayer gets its own dedicated port instead of `SoftwareSerial`). GPIO32/33 were picked over the more "conventional" default RX2/TX2 pins (16/17) because 16/17 double as the PSRAM interface on some ESP32 module variants, which would make them unusable as a UART regardless of external wiring.
+- DFPlayer VCC → the LM2596/battery rail (**not** the microcontroller's own power pin — its amp draws more current than a microcontroller's own regulator can reliably supply, and starving it can brown out the whole board)
+- DFPlayer GND → shared with the microcontroller and servo ground (all one common ground)
 - SD card: FAT32, with an `mp3` folder in the root containing `0001.mp3`, `0002.mp3`, etc. — `playMp3Folder(N)` plays `000N.mp3`
 - `play <N>` in the Serial Monitor tests a track directly, independent of any animation
+- **Currently unresolved on the ESP32 build**: the DFPlayer isn't being detected (`dfPlayerReady` stays `false`, so sound-triggering animations run their servo motion silently) even with TX/RX crossed correctly and both wiring and power double-checked. Doesn't block any servo/animation work — every sound-triggering animation already checks `dfPlayerReady` before attempting playback.
 
 **Speaker:** the stock/bundled speaker that ships with most DFPlayer kits is quiet even at max software volume (`dfPlayer.volume(30)`, already set in the sketch). For a louder upgrade, look for:
 
@@ -97,10 +102,14 @@ If a speaker swap still isn't loud enough, the next step up is a small external 
 
 - **Ambient sway** — `neck1`/`neck2`/`neck3` sway continuously, each on a different period so the combined motion doesn't look like a robotic uniform wobble.
 - **Regular blinking** — every 3–6 seconds, independent of everything else.
-- **Bigger animations** — every 10–20 seconds, one of `tilt` / `yawn` / `look around` / `look hold` / `chomp` / `big tilt` / `look up` / `sleepy` / `shake` / `shake chomp` fires. Deliberately excludes "stateful" animations (`eyes closed`, `look right`/`look left`) that move somewhere and stay, since a random pick landing on one of those and not revisiting it for a while would look broken rather than alive. Also excludes `flinch`, which was removed after the servos would occasionally seize up on its fast startle snap.
+- **Bigger animations** — every 10–20 seconds, one of `tilt` / `yawn` / `look around` / `look hold` / `chomp` / `big tilt` / `look up` / `sleepy` / `shake` / `shake chomp` fires, weighted so small/cheap gestures (`tilt`, `look around`, `chomp`) come up far more often than the dramatic ones (`big tilt`, `shake`, `shake chomp`), and never the same one twice in a row. Deliberately excludes "stateful" animations (`eyes closed`, `look right`/`look left`) that move somewhere and stay, since a random pick landing on one of those and not revisiting it for a while would look broken rather than alive. Also excludes `flinch`, which was removed after the servos would occasionally seize up on its fast startle snap.
 - **Freezes** — every 6–10 seconds (between the blink and big-animation cadence), the sway eases down to a dead stop for 2–4 seconds, then eases back up — just a moment of stillness before it keeps moving.
 
-The sway doesn't actually stop while a blink or bigger animation plays — `moveServosTogether()` drives whichever neck axis a given call isn't already using itself (at full amplitude under a blink, since blinking never touches the neck; at a lessened amplitude under a bigger animation, since that one *is* actively steering some of those axes). This only activates while idle mode has set a global flag, so it's a no-op for any animation triggered directly from the Serial Monitor.
+The sway doesn't actually stop while a blink or bigger animation plays — `moveServosTogether()` drives whichever neck/eye axis a given call isn't already using itself (at full amplitude under a blink, since blinking never touches the neck; at a lessened amplitude under a bigger animation, since that one *is* actively steering some of those axes). This only activates while idle mode has set a global flag, so it's a no-op for any animation triggered directly from the Serial Monitor.
+
+A few of the smaller animations (`tilt`, `yawn`, `look around`, `big tilt`, `look up`, `sleepy`, `chomp`) also jitter their own hold durations, rep counts, or depth slightly on every call, so the exact same animation doesn't look and time out identically every time it fires.
+
+A jaw "breathing" micro-motion (a subtle idle wobble when nothing else was using the jaw) was tried and then removed -- it made the jaw move almost continuously instead of only during animations, and that was enough extra cycling to expose a marginal connection at the jaw servo's connector (it would intermittently lose all holding torque, fixed by reseating the connector). Worth revisiting once that wiring is confirmed solid.
 
 Getting the freeze to not look jerky took a couple of real fixes worth knowing about if this code gets touched again: the sway's amplitude fades smoothly using the same exponential ease as everything else, but the sine wave's *phase* has to be explicitly frozen too (snapshotted at freeze start, resumed from exactly that point at freeze end) — otherwise the phase keeps advancing invisibly underneath a purely amplitude-based fade, and resuming can land on a fast-moving part of the cycle that fights the ramp-up. There was also a sign error where the fade-*out of* a freeze was computing time-remaining instead of progress-into-the-ramp, so it counted the wrong direction and re-zeroed itself right as the freeze ended.
 
@@ -121,6 +130,6 @@ To generate a new one from another clip: run the file through a high-pass + FFT 
 | 11 | `ror two` (alternate roar) |
 | 12 | `eyes closed` / `eyes open`, `test1` smoke-test command |
 | 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw` was mounted reversed at the time); logical angle tracked in code instead of read back from the servo |
-| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly; added a hard per-servo speed cap; `flinch` removed after its fast startle snap kept making the servos seize up, replaced in the idle pool by `chomp`, `big tilt`, `look up`, and `sleepy` |
+| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly; added a hard per-servo speed cap; `flinch` removed after its fast startle snap kept making the servos seize up, replaced in the idle pool by `chomp`, `big tilt`, `look up`, and `sleepy`; added `shake` and `shake chomp`; migrated from an Arduino Uno to an ESP32 (`stress test` diagnostic command added along the way to help track down a servo power brownout); DFPlayer detection still unresolved on the new board |
 
 All prior versions are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference.

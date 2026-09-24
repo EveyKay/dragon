@@ -1,16 +1,15 @@
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
-#include <avr/pgmspace.h>
-#include <SoftwareSerial.h>
 #include <DFRobotDFPlayerMini.h>
 #include <string.h>
 #include <stdlib.h>
 
 // ============================================================
 // SERVO DRIVER (PCA9685, via I2C)
-// Board's SCL -> Arduino A5, SDA -> Arduino A4, VCC -> Arduino 5V,
-// GND -> Arduino GND. Servo power (V+ terminal, separate from the
-// logic VCC pin) comes from the LM2596/battery rail, not the Arduino.
+// Board's SCL -> ESP32 GPIO22, SDA -> ESP32 GPIO21, VCC -> ESP32 3.3V,
+// GND -> ESP32 GND (the PCA9685's logic side is fine on 3.3V; servo
+// power (V+ terminal, separate from the logic VCC pin) comes from the
+// LM2596/battery rail, not the microcontroller, on either board).
 //
 // Servos used to be driven directly by the Servo library, but that
 // relies on constant timer interrupts to hold position -- which
@@ -18,8 +17,11 @@
 // DFPlayer, causing random servo glitches (and occasional dropouts
 // on whichever servo had the least torque margin) right around
 // sound-triggering commands. Routing servos through the PCA9685
-// instead removes the Arduino from pulse generation entirely, so
-// there's no timer interrupt left for SoftwareSerial to collide with.
+// instead removes the microcontroller from pulse generation entirely,
+// so there's no timer interrupt left for SoftwareSerial to collide
+// with -- and on the ESP32, the DFPlayer now gets a real second
+// hardware UART instead of SoftwareSerial at all (see below), so that
+// whole class of interrupt collision can't happen in the first place.
 // ============================================================
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
@@ -37,12 +39,24 @@ const int SERVO_MAX_TICKS = 492; // 2400us
 
 // ============================================================
 // SOUND MODULE (DFPlayer Mini)
-// DFPlayer TX -> Arduino pin 10 (Arduino RX)
-// DFPlayer RX -> Arduino pin 11 (Arduino TX)
+// DFPlayer TX -> ESP32 GPIO32
+// DFPlayer RX -> ESP32 GPIO33
+// This is UART2, a real hardware serial port -- the ESP32 has three
+// independent UARTs, so unlike the Uno (one hardware UART, already
+// spoken for by the Serial Monitor connection) the DFPlayer gets its
+// own dedicated hardware port instead of the software-bit-banged
+// SoftwareSerial the Uno build had to use. The ESP32's UART pins
+// aren't fixed to specific GPIOs (unlike the Uno) -- any two general
+// purpose pins work here. GPIO32/33 were picked over the more
+// "conventional" default RX2/TX2 pins (16/17) because 16/17 double as
+// the PSRAM interface on some ESP32 module variants (WROVER-style),
+// which would make them unusable as a UART no matter how correctly
+// they're wired externally. 32/33 have no alternate function on any
+// ESP32 variant.
 // SD card layout: an "mp3" folder in the card's root containing
 // 0001.mp3, 0002.mp3, etc. -- playMp3Folder(N) plays 000N.mp3.
 // ============================================================
-SoftwareSerial dfSerial(10, 11); // RX, TX
+HardwareSerial dfSerial(2); // UART2
 DFRobotDFPlayerMini dfPlayer;
 bool dfPlayerReady = false;
 
@@ -347,9 +361,9 @@ void moveServoSmooth(const char* name, int targetAngle) {
 void setup() {
   Serial.begin(9600);
 
-  randomSeed(analogRead(A0)); // A0 is unconnected -- floating-pin noise seeds curiousTiltAnimation()'s side pick
+  randomSeed(analogRead(34)); // GPIO34 is unconnected -- floating-pin noise seeds curiousTiltAnimation()'s side pick
 
-  Wire.begin();
+  Wire.begin(21, 22); // SDA, SCL
   pwm.begin();
   pwm.setPWMFreq(50); // standard hobby servo frequency
 
@@ -367,7 +381,7 @@ void setup() {
 
   Serial.println(F("Dragon servo setup complete."));
 
-  dfSerial.begin(9600);
+  dfSerial.begin(9600, SERIAL_8N1, 32, 33); // RX, TX
   if (dfPlayer.begin(dfSerial)) {
     dfPlayerReady = true;
     dfPlayer.volume(30); // 0 (silent) - 30 (loudest)
@@ -739,7 +753,7 @@ void curiousTiltAnimation() {
   const int leanTargets[] = { neck2Tilt, neck3Tilt, eyeTilt, eyeTilt };
   moveServosTogether(names, leanTargets, 4, 60, 12);
 
-  idleHold(700, true, false, false, false, false); // hold the curious pose -- neck1 is the only axis this animation doesn't use, so it's the only one free to keep swaying
+  idleHold(random(600, 900), true, false, false, false, false); // hold the curious pose -- neck1 is the only axis this animation doesn't use, so it's the only one free to keep swaying
 
   const int homeTargets[] = { 90, 90, 90, 90 };
   moveServosTogether(names, homeTargets, 4, 60, 12);
@@ -757,7 +771,7 @@ void yawnAnimation() {
   const int openTargets[] = { 25, 110, 49, 105 }; // squint: halfway between each eye's open and closed
   moveServosTogether(names, openTargets, 4, 90, 14); // slow -- a yawn isn't rushed
 
-  idleHold(600, false, true, true, true, true); // hold at the peak -- a yawn never touches neck2/neck3 or the eyes, so all of those stay free
+  idleHold(random(500, 800), false, true, true, true, true); // hold at the peak -- a yawn never touches neck2/neck3 or the eyes, so all of those stay free
 
   const int homeTargets[] = { 90, 90, 58, 96 };
   moveServosTogether(names, homeTargets, 4, 70, 12);
@@ -775,11 +789,11 @@ void lookAroundAnimation() {
 
   const int rightTargets[] = { 140, 140, 125, 125 };
   moveServosTogether(names, rightTargets, 4, 90, 14); // slow sweep to one side
-  idleHold(400, true, false, false, false, false); // brief pause, like taking in what's there -- neck1 is the only free axis here
+  idleHold(random(300, 600), true, false, false, false, false); // brief pause, like taking in what's there -- neck1 is the only free axis here
 
   const int leftTargets[] = { 40, 40, 55, 55 };
   moveServosTogether(names, leftTargets, 4, 130, 12); // slower sweep across to the other side
-  idleHold(400, true, false, false, false, false);
+  idleHold(random(300, 600), true, false, false, false, false);
 
   const int frontTargets[] = { 90, 90, 90, 90 };
   moveServosTogether(names, frontTargets, 4, 80, 10); // settle back to center
@@ -793,10 +807,11 @@ void lookAroundAnimation() {
 // ============================================================
 void quickChompsAnimation() {
   const char* names[] = { "jaw" };
-  const int openTarget[] = { 75 };  // a small, shallow open -- not a full yawn
   const int closeTarget[] = { 90 };
 
-  for (int rep = 0; rep < 3; rep++) {
+  int repCount = random(2, 4); // 2 or 3 -- a real chomp doesn't always come in the same exact count
+  for (int rep = 0; rep < repCount; rep++) {
+    int openTarget[] = { (int)random(70, 79) }; // a small, shallow open -- not a full yawn, and never quite the same depth twice
     moveServosTogether(names, openTarget, 1, 15, 10);  // quick snap open
     moveServosTogether(names, closeTarget, 1, 15, 10); // quick snap closed
   }
@@ -824,7 +839,7 @@ void bigTiltAnimation() {
   const int leanTargets[] = { neck2Tilt, neck3Tilt, eyeTilt, eyeTilt };
   moveServosTogether(names, leanTargets, 4, 90, 14); // slower than the curious tilt -- it has much further to travel
 
-  idleHold(1400, true, false, false, false, false); // a longer, more deliberate hold than the curious tilt -- neck1 is the only free axis here
+  idleHold(random(1200, 1700), true, false, false, false, false); // a longer, more deliberate hold than the curious tilt -- neck1 is the only free axis here
 
   const int homeTargets[] = { 90, 90, 90, 90 };
   moveServosTogether(names, homeTargets, 4, 90, 14);
@@ -912,7 +927,7 @@ void neckStretchAnimation() {
   const int upTarget[] = { 45 }; // lower angle = head up on this axis (opposite of what its number suggests)
   moveServosTogether(names, upTarget, 1, 70, 14); // slow, deliberate stretch upward
 
-  idleHold(1000, false, true, true, true, true); // hold at full stretch -- doesn't touch neck2/neck3 or the eyes, so all stay free
+  idleHold(random(800, 1300), false, true, true, true, true); // hold at full stretch -- doesn't touch neck2/neck3 or the eyes, so all stay free
 
   const int homeTarget[] = { 90 };
   moveServosTogether(names, homeTarget, 1, 70, 12);
@@ -931,7 +946,7 @@ void sleepyBlinkAnimation() {
 
   moveServosTogether(names, droopTargets, 3, 30, 25); // slow, heavy-lidded ease
 
-  idleHold(1600, false, true, true, true, true); // hold the droop -- doesn't touch neck2/neck3 or the eyes, so all stay free
+  idleHold(random(1300, 1900), false, true, true, true, true); // hold the droop -- doesn't touch neck2/neck3 or the eyes, so all stay free
 
   const int homeTargets[] = { 58, 96, 90 };
   moveServosTogether(names, homeTargets, 3, 25, 20);
@@ -1196,6 +1211,43 @@ void scanChannels() {
 }
 
 // ============================================================
+// Twitch stress test (diagnostic)
+// All 8 servos twitch +/-12 degrees around their own home angle, in
+// sync, back and forth, for as long as this runs -- deliberately the
+// worst case for the shared servo power rail, since every servo
+// accelerates from a stop at the same instant on every direction
+// change instead of the more staggered current draw normal animations
+// produce. Meant for reproducing/observing a brownout (e.g. watching
+// jaw tension or metering V+ at the PCA9685) rather than for looking
+// natural. Runs until Serial input arrives, same as idle mode. Type
+// "stress test" into the Serial Monitor to trigger it.
+// ============================================================
+void twitchStressTest() {
+  const char* names[] = { "eyeLeft", "eyeRight", "eyelidLeft", "eyelidRight", "jaw", "neck1", "neck2", "neck3" };
+  const int twitchAmplitude = 12;
+
+  int homeTargets[NUM_SERVOS];
+  int highTargets[NUM_SERVOS];
+  int lowTargets[NUM_SERVOS];
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    int idx = servoIndex(names[i]);
+    homeTargets[i] = servoConfigs[idx].homeAngle;
+    highTargets[i] = servoConfigs[idx].homeAngle + twitchAmplitude;
+    lowTargets[i] = servoConfigs[idx].homeAngle - twitchAmplitude;
+  }
+
+  Serial.println(F("Twitch stress test running -- type anything to stop."));
+  while (!Serial.available()) {
+    moveServosTogether(names, highTargets, NUM_SERVOS, 20, 10);
+    if (Serial.available()) break;
+    moveServosTogether(names, lowTargets, NUM_SERVOS, 20, 10);
+  }
+
+  moveServosTogether(names, homeTargets, NUM_SERVOS, 20, 10);
+  Serial.println(F("Twitch stress test stopped."));
+}
+
+// ============================================================
 // Idle mode
 // Randomly runs "self-returning" animations -- ones that do their
 // thing and settle back to home on their own -- with a 10-20 second
@@ -1265,6 +1317,48 @@ AnimationFunc idleAnimations[] = {
 };
 const uint8_t NUM_IDLE_ANIMATIONS = sizeof(idleAnimations) / sizeof(idleAnimations[0]);
 
+// Relative pick weights, parallel to idleAnimations[] above -- higher
+// means more common. Real animals don't do every gesture equally
+// often: small, cheap movements (a glance, a little tilt) happen all
+// the time, while the big, dramatic ones (a hard shake, leaning almost
+// to the mechanical limit) are rare enough to still read as notable
+// when they do happen, instead of just another animation in the same
+// rotation. Tune freely -- these are just relative to each other, not
+// on any fixed scale.
+const uint8_t idleAnimationWeights[] = {
+  10, // curiousTiltAnimation (tilt)
+  6,  // yawnAnimation (yawn)
+  8,  // lookAroundAnimation (look around)
+  7,  // lookAndHoldAnimation (look hold)
+  8,  // quickChompsAnimation (chomp)
+  3,  // bigTiltAnimation (big tilt)
+  6,  // neckStretchAnimation (look up)
+  4,  // sleepyBlinkAnimation (sleepy)
+  3,  // shakeAnimation (shake)
+  2,  // shakeChompAnimation (shake chomp)
+};
+
+// Picks a random idle animation, weighted by idleAnimationWeights[]
+// and never the same one that just played (excludeIdx, or -1 to not
+// exclude anything) -- back-to-back repeats of the exact same gesture
+// read as glitchy/looping rather than alive, even with everything else
+// randomized.
+uint8_t pickWeightedIdleAnimation(int8_t excludeIdx) {
+  uint16_t totalWeight = 0;
+  for (uint8_t i = 0; i < NUM_IDLE_ANIMATIONS; i++) {
+    if (i == excludeIdx) continue;
+    totalWeight += idleAnimationWeights[i];
+  }
+
+  long roll = random(0, totalWeight);
+  for (uint8_t i = 0; i < NUM_IDLE_ANIMATIONS; i++) {
+    if (i == excludeIdx) continue;
+    if (roll < idleAnimationWeights[i]) return i;
+    roll -= idleAnimationWeights[i];
+  }
+  return 0; // unreachable -- the loop above always returns before falling off the end
+}
+
 void printIdleAnimationName(uint8_t idx) {
   Serial.print(F("[idle] "));
   switch (idx) {
@@ -1312,6 +1406,7 @@ void idleAnimation() {
   long sinceResync = 0; // ms since the neck was last at a clean 90 baseline
   long nextBlinkAt = random(3000, 6000);
   long nextBigAnimationAt = random(10000, 20000);
+  int8_t lastIdleAnimationIdx = -1; // -1 = nothing's played yet, so the first pick has nothing to exclude
 
   // "Freeze" -- the dragon just holds still for a few seconds before
   // resuming the ambient sway, like it paused. More often than the
@@ -1418,7 +1513,8 @@ void idleAnimation() {
       idleSwayScale = 0.7;
       if (Serial.available()) break;
 
-      uint8_t idx = random(0, NUM_IDLE_ANIMATIONS);
+      uint8_t idx = pickWeightedIdleAnimation(lastIdleAnimationIdx);
+      lastIdleAnimationIdx = idx;
       printIdleAnimationName(idx);
       idleAnimations[idx](); // fires from wherever neck2/neck3 currently are
 
@@ -1658,6 +1754,11 @@ void handleSerialCommands() {
   if (strcasecmp(line, "scan") == 0) {
     Serial.println(F("Scanning channels 0-15..."));
     scanChannels();
+    return;
+  }
+
+  if (strcasecmp(line, "stress test") == 0) {
+    twitchStressTest();
     return;
   }
 
