@@ -24,17 +24,7 @@ The sketch originally ran on an Arduino Uno; it was migrated to an ESP32 (see th
 
 Older sketches in `archive/` and `experiments/` are plain `.ino` files kept for reference — they aren't part of the PlatformIO build and would need their own environment if compiled again.
 
-### WiFi / OTA updates
-
-The sketch connects to WiFi at boot and, once connected, accepts new firmware over the air via `ArduinoOTA` — no USB cable needed. WiFi/OTA are optional: if the network isn't reachable within 15 seconds, setup gives up and keeps running over USB alone rather than hanging.
-
-To set it up:
-1. Copy `dragon_servos_15/wifi_credentials.h.example` to `dragon_servos_15/wifi_credentials.h` and fill in your WiFi SSID/password and a password of your choosing for OTA auth. This file is gitignored — it never gets committed.
-2. Copy `platformio_local.ini.example` (repo root) to `platformio_local.ini` and set `upload_port` to the dragon's IP address (printed to Serial at boot) or `dragon.local`, and `upload_flags`'s `--auth=` to match the OTA password from step 1. Also gitignored.
-3. Flash once over USB (`pio run -e esp32dev -t upload`) so the WiFi/OTA code is actually on the board.
-4. From then on, `pio run -e esp32dev_ota -t upload` pushes new firmware over WiFi.
-
-**Known limitation:** the ESP32 (this classic WROOM-32 variant) only supports 2.4GHz WiFi, not 5GHz. If your router uses band-steering under one SSID name (common on mesh/dual-band routers), the ESP32 may never see the network at all — check the boot log for `WiFi not connected (status 1)`, which means the SSID wasn't found in its scan, not a wrong password. Look for a 2.4GHz-specific network name, or a router setting to split the bands.
+The sketch briefly gained WiFi + OTA firmware updates (connect at boot, push new code over the air via `ArduinoOTA`), but that was removed again — not currently needed, and the extra WiFi radio activity was one more variable while chasing down hardware issues. It's straightforward to re-add later (git history has the working implementation) if it becomes useful once there's a 2.4GHz network available for it.
 
 ## Wiring
 
@@ -69,8 +59,8 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 
 - `<servoName> <angle>` — move one servo directly, e.g. `jaw 60`
 - `blink` — synchronized eyelid blink
-- `ror` — roar animation (neck drops, jaw opens, eyelids blink, neck sways), paired with [`sounds/clip_11.mp3`](sounds/clip_11.mp3)
-- `ror two` — alternate roar: neck/jaw bob through two cycles with a mid-blink, paired with [`sounds/ror_two.mp3`](sounds/ror_two.mp3) (a single bark from a longer recording, sped up 1.5x and duplicated so its two peaks land exactly on this animation's two mouth-fully-open instants)
+- `ror` — roar animation (neck drops, jaw opens, eyelids blink, neck sways), paired with [`sounds/ror_burst.mp3`](sounds/ror_burst.mp3) (a short, sharp bark extracted from a longer recording and boosted ~10.5dB, so it only sounds at the very start of the animation rather than filling the whole thing)
+- `ror two` — alternate roar: neck/jaw bob through two cycles with a mid-blink, paired with [`sounds/clip_17.mp3`](sounds/clip_17.mp3) (has two real barks of its own, ~510ms apart, landing close to this animation's two mouth-fully-open instants -- no re-editing needed, unlike the original pairing)
 - `look right` / `look left` / `front` — eyes and lower neck turn together, or reset to center
 - `eyes closed` / `eyes open` — eyelids to fully closed/open
 - `tilt` — curious head tilt to a random side (neck2/neck3 lean, eyes glance the same way), no sound
@@ -83,7 +73,12 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 - `sleepy` — eyelids ease to a heavy half-closed squint with a slight downward droop, no sound
 - `shake` — neck2 swings between its two safe extremes a few times, like a head shake, paced to stay under the speed cap, no sound
 - `shake chomp` — eyes close, then neck2 shakes and the jaw does quick little chomps at the same time, like shaking something in its mouth, no sound
+- `look down` — neck1 dips down and holds, like sniffing something at ground level, the mirror of `look up`, no sound
+- `sniff` — 3–4 quick, shallow head-dip nods, like sniffing the air rapidly, no sound
+- `neck roll` — neck2/neck3 sway with a phase offset between them, reading as a rolling stretch rather than a synced lean, no sound
+- `double blink` — two quick blinks back to back, like a surprised double-take, no sound
 - `clip5` — servo motion generated from [`sounds/clip_05.mp3`](sounds/clip_05.mp3)'s volume envelope (see below)
+- `clip1` — same envelope-driven approach as `clip5`, generated from [`sounds/clip_01.mp3`](sounds/clip_01.mp3), but with much bigger and faster neck2/neck3 side-to-side motion (see below)
 - `idle` — ambient idle mode: continuous neck sway, regular blinking, occasional bigger animations and "freeze" pauses, all randomized, no sound (see below); type anything to stop it
 - `scan` — diagnostic: cycles PCA9685 channels 0–15, wiggling and announcing each one, for figuring out physical wiring on an unlabeled board
 - `stress test` — diagnostic: all 8 servos twitch ±12° around home in sync, back and forth, for as long as it runs -- the worst case for the shared servo power rail (every servo accelerates at once on every direction change), meant for reproducing/metering a power brownout rather than looking natural; type anything to stop it
@@ -113,7 +108,7 @@ If a speaker swap still isn't loud enough, the next step up is a small external 
 
 - **Ambient sway** — `neck1`/`neck2`/`neck3` sway continuously, each on a different period so the combined motion doesn't look like a robotic uniform wobble.
 - **Regular blinking** — every 3–6 seconds, independent of everything else.
-- **Bigger animations** — every 10–20 seconds, one of `tilt` / `yawn` / `look around` / `look hold` / `chomp` / `big tilt` / `look up` / `sleepy` / `shake` / `shake chomp` fires, weighted so small/cheap gestures (`tilt`, `look around`, `chomp`) come up far more often than the dramatic ones (`big tilt`, `shake`, `shake chomp`), and never the same one twice in a row. Deliberately excludes "stateful" animations (`eyes closed`, `look right`/`look left`) that move somewhere and stay, since a random pick landing on one of those and not revisiting it for a while would look broken rather than alive. Also excludes `flinch`, which was removed after the servos would occasionally seize up on its fast startle snap.
+- **Bigger animations** — every 10–20 seconds, one of `tilt` / `yawn` / `look around` / `look hold` / `chomp` / `big tilt` / `look up` / `sleepy` / `shake` / `shake chomp` / `look down` / `sniff` / `neck roll` / `double blink` fires, weighted so small/cheap gestures (`tilt`, `look around`, `chomp`, `sniff`) come up far more often than the dramatic ones (`big tilt`, `shake`, `shake chomp`), and never the same one twice in a row. Deliberately excludes "stateful" animations (`eyes closed`, `look right`/`look left`) that move somewhere and stay, since a random pick landing on one of those and not revisiting it for a while would look broken rather than alive. Also excludes `flinch`, which was removed after the servos would occasionally seize up on its fast startle snap.
 - **Freezes** — every 6–10 seconds (between the blink and big-animation cadence), the sway eases down to a dead stop for 2–4 seconds, then eases back up — just a moment of stillness before it keeps moving.
 
 The sway doesn't actually stop while a blink or bigger animation plays — `moveServosTogether()` drives whichever neck/eye axis a given call isn't already using itself (at full amplitude under a blink, since blinking never touches the neck; at a lessened amplitude under a bigger animation, since that one *is* actively steering some of those axes). This only activates while idle mode has set a global flag, so it's a no-op for any animation triggered directly from the Serial Monitor.
@@ -126,9 +121,9 @@ Getting the freeze to not look jerky took a couple of real fixes worth knowing a
 
 ### Sound-synced animations
 
-`clip5Animation()` isn't hand-timed like the others — it's generated from the actual volume envelope of a recording. The audio is sampled in 40ms slices; the jaw and neck1 angles for each slice are derived directly from how loud that slice is, so the mouth snaps open and the head dips on every bark and eases back on the quiet stretches between them. The eyelids get one quick blink at the recording's single loudest instant. The per-frame angle tables live in the sketch itself (`clip5Jaw[]` / `clip5Neck1[]`); the source audio is kept in [`sounds/`](sounds/) for reference and for future resyncing if a sound module gets added.
+`clip5Animation()` and `clip1Animation()` aren't hand-timed like the others — they're generated from the actual volume envelope of a recording. The audio is sampled in 40ms slices; the jaw and neck1 angles for each slice are derived directly from how loud that slice is, so the mouth snaps open and the head dips on every bark and eases back on the quiet stretches between them. The eyelids get one quick blink at the recording's single loudest instant. `clip1` additionally drives neck2/neck3 with a much bigger, faster side-to-side turn than `clip5`'s subtle background sway. The per-frame angle tables live in the sketch itself (`clip5Jaw[]`/`clip5Neck1[]`, `clip1Jaw[]`/`clip1Neck1[]`); the source audio is kept in [`sounds/`](sounds/) for reference and for future resyncing if the clips ever change.
 
-To generate a new one from another clip: run the file through a high-pass + FFT denoise pass, sample RMS loudness in fixed time slices (e.g. via `ffmpeg`'s `astats`/`ametadata` filters), normalize and smooth the envelope, then map it to servo angles the same way `clip5Jaw`/`clip5Neck1` do.
+To generate a new one from another clip: decode it to raw PCM with `ffmpeg` (`-ar 48000 -ac 1 -f s16le`), compute RMS loudness in 40ms slices (1920 samples at 48kHz), convert to dB, smooth with a short moving average, normalize against that recording's own min/max, then map to servo angles the same way `clip1Jaw`/`clip1Neck1` do. Find the loudest frame for the blink window (8 frames closing, 8 opening, centered on that frame).
 
 ## Version history
 
@@ -141,6 +136,6 @@ To generate a new one from another clip: run the file through a high-pass + FFT 
 | 11 | `ror two` (alternate roar) |
 | 12 | `eyes closed` / `eyes open`, `test1` smoke-test command |
 | 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw` was mounted reversed at the time); logical angle tracked in code instead of read back from the servo |
-| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly; added a hard per-servo speed cap; `flinch` removed after its fast startle snap kept making the servos seize up, replaced in the idle pool by `chomp`, `big tilt`, `look up`, and `sleepy`; added `shake` and `shake chomp`; migrated from an Arduino Uno to an ESP32 (`stress test` diagnostic command added along the way to help track down a servo power brownout, and a wiring mistake tying the PCA9685's VCC to the battery rail instead of the ESP32's 3.3V pin); added WiFi + OTA firmware updates, optional and falling back to USB-only if the network isn't reachable |
+| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly; added a hard per-servo speed cap; `flinch` removed after its fast startle snap kept making the servos seize up, replaced in the idle pool by `chomp`, `big tilt`, `look up`, and `sleepy`; added `shake` and `shake chomp`; migrated from an Arduino Uno to an ESP32 (`stress test` diagnostic command added along the way to help track down a servo power brownout, fixed with a bulk capacitor across the PCA9685's V+/GND, plus a wiring mistake tying the PCA9685's VCC to the battery rail instead of the ESP32's 3.3V pin); briefly added and then removed WiFi + OTA firmware updates (not currently needed, still in git history if useful later); fixed a lingering DFPlayer disconnection; smoothed out a snap at the end of moves by spreading any speed-cap lag over several steps instead of one, and gentled the default ease curve; slowed neck1's idle sway so it doesn't read as repeated nodding; added `look down`, `sniff`, `neck roll`, and `double blink`; replaced `ror two`'s sound with `clip_17` (has two natural barks of its own, unlike the original artificially-duplicated single bark); replaced `ror`'s sound with `ror_burst.mp3`, a single sharp bark extracted and boosted from a longer recording (`dragon_sound_clips2/clip2_10.mp3`); added `clip1`, a second envelope-driven animation (generated from `clip_01.mp3` with a proper ffmpeg RMS analysis) with much bigger neck2/neck3 turning than `clip5` |
 
 All prior versions are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference.

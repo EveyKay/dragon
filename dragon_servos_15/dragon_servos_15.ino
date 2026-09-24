@@ -3,10 +3,6 @@
 #include <DFRobotDFPlayerMini.h>
 #include <string.h>
 #include <stdlib.h>
-#include <WiFi.h>
-#include <ESPmDNS.h>
-#include <ArduinoOTA.h>
-#include "wifi_credentials.h" // gitignored -- copy wifi_credentials.h.example and fill in your own network details
 
 // ============================================================
 // SERVO DRIVER (PCA9685, via I2C)
@@ -124,6 +120,17 @@ unsigned long lastMoveMillis[NUM_SERVOS];
 // hobby servo slew rates even under mechanical load.
 const float MAX_DEGREES_PER_MS = 0.2;
 
+// Shared default for easeInOutExpo()'s steepness -- one named constant
+// instead of the same literal hardcoded separately in both
+// easeInOutExpo() and moveServosTogether(), which could silently drift
+// apart if only one ever got tuned. Lowered from 20 to 14: a gentler
+// curve spikes less hard through the middle of a move, which both
+// looks less abrupt and needs the speed cap to intervene less often in
+// the first place (less peak velocity means less chance of exceeding
+// MAX_DEGREES_PER_MS), so there's less lag for approachAngle() to ever
+// need to correct.
+const float DEFAULT_EASE_STEEPNESS = 14.0;
+
 // Look up a servo's array index by its friendly name.
 // Returns -1 if not found.
 int servoIndex(const char* name) {
@@ -173,6 +180,34 @@ void moveServo(const char* name, int angle, bool capSpeed = true) {
   pwm.setPWM(servoConfigs[idx].channel, 0, ticks);
 }
 
+// Every step-loop in this sketch was computing its target angle purely
+// from an idealized curve (start angle + eased progress), then relying
+// on a single uncapped "final step" to force an exact landing no
+// matter how far behind the real position had drifted if the speed
+// cap throttled earlier steps. That's what turned into a visible snap
+// at the end of a move -- all of the accumulated lag landing in one
+// uncapped jump instead of easing out.
+//
+// This spreads that catch-up across the last catchUpSteps of a move
+// instead: once stepsRemaining drops into that window, the target for
+// this tick is computed from the servo's actual current angle (not
+// the idealized curve) divided evenly across however many steps are
+// actually left, so a lagging servo eases back onto target over
+// several ticks instead of snapping on the last one. Same idea as the
+// "recompute from wherever you actually are, not where you assumed
+// you'd be" trick from the smoothing technique in James Bruton's
+// "How To Make Robots Move Smoothly" video, applied specifically to
+// the tail end of our existing eased curves rather than replacing them
+// outright (which would lose the deliberate ease-in and the precise,
+// sound-synced timing several animations depend on).
+int approachAngle(const char* name, int idealAngle, int target, int stepsRemaining, int catchUpSteps) {
+  if (stepsRemaining > catchUpSteps) return idealAngle; // not in the catch-up window yet -- use the curve as normal
+  int idx = servoIndex(name);
+  if (idx == -1) return idealAngle;
+  int remainingGap = target - lastAngle[idx];
+  return lastAngle[idx] + remainingGap / (stepsRemaining + 1);
+}
+
 // Eases a linear progress value (0.0-1.0) into an exponential
 // ease-in-out curve: starts slow, accelerates hard through the
 // middle, then decelerates into the target -- closer to how a real
@@ -183,16 +218,17 @@ void moveServo(const char* name, int angle, bool capSpeed = true) {
 // higher means flatter start/end but a much higher PEAK velocity for
 // the same total duration (roughly proportional to steepness itself,
 // not just to total time), which is why stretching a movement's
-// duration can't fully compensate for a steeper curve. The default
-// (20) is used everywhere movement is eased through this curve.
+// duration can't fully compensate for a steeper curve. DEFAULT_EASE_STEEPNESS
+// is used everywhere movement is eased through this curve.
 //
-// This used to go as high as 60, which crammed nearly all of a move's
-// travel into a narrow sliver of time near the middle -- MAX_DEGREES_PER_MS
+// This used to go as high as 60, then 20 -- both crammed more of a
+// move's travel into a narrow sliver of time near the middle than the
+// current, gentler default does. MAX_DEGREES_PER_MS
 // below is what actually keeps that (or any curve) from commanding a
 // servo faster than it can physically track, so this default is free
 // to just be picked for how the motion looks rather than doubling as
 // the only thing standing between a steep curve and a strained motor.
-float easeInOutExpo(float t, float steepness = 20.0) {
+float easeInOutExpo(float t, float steepness = DEFAULT_EASE_STEEPNESS) {
   if (t <= 0.0) return 0.0;
   if (t >= 1.0) return 1.0;
   const float ln2 = 0.6931472;
@@ -237,11 +273,12 @@ void randomizeSwayVariance() {
   neck1SwayAmplitude = random(18, 30);
   neck2SwayAmplitude = random(14, 24);
   neck3SwayAmplitude = random(10, 18);
-  // Widened again -- was 3500-14000/5000-17000/6500-20000. Pushing the
-  // fast end quicker and the slow end lazier spreads the pace out
-  // further reroll to reroll, so consecutive swings can differ sharply
-  // in speed instead of drifting only moderately.
-  neck1SwayPeriodMs = random(2000, 20000);
+  // neck1's floor was pulled back up from 2000 to 6000 -- fast enough
+  // to still read as ambient drift, but a 2-4 second full up/down cycle
+  // was quick enough to look like the dragon repeatedly nodding rather
+  // than idly swaying. neck2/neck3 (side-to-side) weren't reported as
+  // an issue, so left alone.
+  neck1SwayPeriodMs = random(6000, 20000);
   neck2SwayPeriodMs = random(3000, 24000);
   neck3SwayPeriodMs = random(4000, 28000);
 }
@@ -321,7 +358,6 @@ void idleHold(long durationMs, bool doNeck1, bool doNeck2, bool doNeck3, bool do
   const int stepMs = 20; // was 50 -- finer sampling keeps the steep sway curve looking like motion instead of a pop
   for (long waited = 0; waited < durationMs; waited += stepMs) {
     if (Serial.available()) return;
-    ArduinoOTA.handle();
     applyIdleSway(doNeck1, doNeck2, doNeck3);
     applyIdleGaze(doEyeLeft, doEyeRight);
     delay(stepMs);
@@ -346,18 +382,16 @@ void moveServoSmooth(const char* name, int targetAngle) {
   if (steps == 0) steps = 1;
 
   const int stepDelayMs = 12; // pace per degree of travel
+  const int catchUpSteps = min(12, steps / 3); // spread any speed-cap lag over the last several steps instead of snapping it all onto the final one
 
   for (int i = 0; i <= steps; i++) {
     float t = easeInOutExpo((float)i / steps);
-    int angle = startAngle + t * (clampedTarget - startAngle);
-    // The final step (t == 1.0, angle == clampedTarget exactly) skips
-    // the speed cap -- if an earlier step got throttled by it partway
-    // through the steepest part of the curve, the position can end up
-    // trailing a few degrees behind where the curve says it should be,
-    // and nothing else ever asks it to close that gap. Letting only
-    // this last, guaranteed-exact step bypass the cap means the move
-    // always actually finishes at its real target instead of settling
-    // short of it.
+    int idealAngle = startAngle + t * (clampedTarget - startAngle);
+    int angle = approachAngle(name, idealAngle, clampedTarget, steps - i, catchUpSteps);
+    // The final step is still guaranteed-exact (skips the cap entirely)
+    // as an ultimate safety net, but approachAngle() above should have
+    // already closed out nearly all of any lag gently over the last
+    // several steps, so this no longer needs to be a big jump.
     moveServo(name, angle, i != steps);
     delay(stepDelayMs);
   }
@@ -393,34 +427,6 @@ void setup() {
     Serial.println(F("DFPlayer ready."));
   } else {
     Serial.println(F("DFPlayer not found -- check wiring and SD card."));
-  }
-
-  // WiFi/OTA are optional -- if the network isn't reachable within the
-  // timeout, give up and keep running over USB alone rather than
-  // hanging setup() forever waiting for a connection.
-  Serial.print(F("Connecting to WiFi"));
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  unsigned long wifiStartMillis = millis();
-  const unsigned long wifiTimeoutMs = 15000;
-  while (WiFi.status() != WL_CONNECTED && millis() - wifiStartMillis < wifiTimeoutMs) {
-    delay(500);
-    Serial.print(F("."));
-  }
-  Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print(F("WiFi connected, IP address: "));
-    Serial.println(WiFi.localIP());
-
-    ArduinoOTA.setHostname("dragon"); // reachable as dragon.local, or by the IP address printed above
-    ArduinoOTA.setPassword(OTA_PASSWORD);
-    ArduinoOTA.begin();
-    Serial.println(F("OTA ready -- upload with `pio run -e esp32dev_ota -t upload`."));
-  } else {
-    Serial.print(F("WiFi not connected (status "));
-    Serial.print(WiFi.status()); // 1 = SSID not found, 4 = wrong password/auth failed, 6 = disconnected
-    Serial.println(F(") -- continuing without OTA (USB upload still works)."));
   }
 }
 
@@ -492,7 +498,6 @@ void checkDFPlayer() {
 }
 
 void loop() {
-  ArduinoOTA.handle();
   checkDFPlayer();
   handleSerialCommands();
 }
@@ -513,30 +518,33 @@ void blinkEyelids() {
   int rightSteps = abs(rightOpen - rightClosed);
   int leftSteps = abs(leftClosed - leftOpen);
   int steps = max(rightSteps, leftSteps);          // use the larger so both arrive together
+  const int catchUpSteps = min(12, steps / 3); // spread any speed-cap lag over the last several steps instead of snapping it all onto the final one
 
   // Closing: open -> closed
   for (int i = 0; i <= steps; i++) {
     float t = easeInOutExpo((float)i / steps); // 0.0 -> 1.0
-    int rightAngle = rightOpen + t * (rightClosed - rightOpen);
-    int leftAngle = leftOpen + t * (leftClosed - leftOpen);
+    int rightIdeal = rightOpen + t * (rightClosed - rightOpen);
+    int leftIdeal = leftOpen + t * (leftClosed - leftOpen);
+    int rightAngle = approachAngle("eyelidRight", rightIdeal, rightClosed, steps - i, catchUpSteps);
+    int leftAngle = approachAngle("eyelidLeft", leftIdeal, leftClosed, steps - i, catchUpSteps);
     moveServo("eyelidRight", rightAngle, i != steps); // last step bypasses the speed cap so a closing blink always actually reaches fully closed
     moveServo("eyelidLeft", leftAngle, i != steps);
     applyIdleSway(true, true, true); // blink never touches the neck or eyeballs, so all stay free
     applyIdleGaze(true, true);
-    ArduinoOTA.handle();
     delay(stepDelayMs);
   }
 
   // Opening: closed -> open
   for (int i = 0; i <= steps; i++) {
     float t = easeInOutExpo((float)i / steps);
-    int rightAngle = rightClosed + t * (rightOpen - rightClosed);
-    int leftAngle = leftClosed + t * (leftOpen - leftClosed);
+    int rightIdeal = rightClosed + t * (rightOpen - rightClosed);
+    int leftIdeal = leftClosed + t * (leftOpen - leftClosed);
+    int rightAngle = approachAngle("eyelidRight", rightIdeal, rightOpen, steps - i, catchUpSteps);
+    int leftAngle = approachAngle("eyelidLeft", leftIdeal, leftOpen, steps - i, catchUpSteps);
     moveServo("eyelidRight", rightAngle, i != steps); // last step bypasses the speed cap so an opening blink always actually reaches fully open
     moveServo("eyelidLeft", leftAngle, i != steps);
     applyIdleSway(true, true, true);
     applyIdleGaze(true, true);
-    ArduinoOTA.handle();
     delay(stepDelayMs);
   }
 }
@@ -550,13 +558,20 @@ void blinkEyelids() {
 //            within the same overall duration as the neck/jaw move
 // Type "ror" into the Serial Monitor to trigger it.
 //
-// Paired with mp3/0011.mp3 (sounds/clip_11.mp3) -- two closely-spaced
-// bursts that read as one sustained roar with a growl in the middle,
-// picked to match this animation's ~2.2s single-roar-with-wobble shape.
+// Paired with mp3/0025.mp3 (sounds/ror_burst.mp3) -- just the final
+// bark from clip2_10.mp3 (of the larger dragon_sound_clips2 batch),
+// extracted with ffmpeg, boosted ~10.5dB (mean -29dB -> -18.5dB, peak
+// -13.1dB -> -3dB, leaving a couple dB of headroom before clipping),
+// then slowed to 60% speed (asetrate+aresample, which drops the pitch
+// along with the tempo) to stretch it from ~0.4s to ~0.6s and give it
+// a deeper, more dragon-sized growl instead of a small-dog bark. Still
+// short relative to this animation's ~2.2s runtime, so unlike the old
+// mp3/0011.mp3 pairing it only fills the first second or so, not the
+// whole thing.
 // ============================================================
 void rorAnimation() {
   if (dfPlayerReady) {
-    dfPlayer.playMp3Folder(11);
+    dfPlayer.playMp3Folder(25);
   }
 
   const int neckStart = 90, neckEnd = 20;
@@ -566,10 +581,12 @@ void rorAnimation() {
 
   const int steps = 70;       // resolution of the animation (higher = smoother)
   const int stepDelayMs = 14; // a bit quicker than before
+  const int catchUpSteps = min(12, steps / 3); // spread any speed-cap lag over the last several steps instead of snapping it all onto the final one
 
   for (int i = 0; i <= steps; i++) {
     float t = (float)i / steps; // 0.0 -> 1.0 across the whole animation
     bool isFinalStep = (i == steps); // bypasses the speed cap so this loop always actually lands exactly on its targets, not just close
+    int stepsRemaining = steps - i;
 
     // Neck moves faster than the rest of the animation: it finishes
     // its travel by the 35% mark, then holds at its end angle.
@@ -630,12 +647,12 @@ void rorAnimation() {
       neck3Angle = 90;
     }
 
-    moveServo("neck1", neckAngle, !isFinalStep);
-    moveServo("neck2", neck2Angle, !isFinalStep);
-    moveServo("neck3", neck3Angle, !isFinalStep);
-    moveServo("jaw", jawAngle, !isFinalStep);
-    moveServo("eyelidRight", rightAngle, !isFinalStep);
-    moveServo("eyelidLeft", leftAngle, !isFinalStep);
+    moveServo("neck1", approachAngle("neck1", neckAngle, neckEnd, stepsRemaining, catchUpSteps), !isFinalStep);
+    moveServo("neck2", approachAngle("neck2", neck2Angle, 90, stepsRemaining, catchUpSteps), !isFinalStep);
+    moveServo("neck3", approachAngle("neck3", neck3Angle, 90, stepsRemaining, catchUpSteps), !isFinalStep);
+    moveServo("jaw", approachAngle("jaw", jawAngle, jawEnd, stepsRemaining, catchUpSteps), !isFinalStep);
+    moveServo("eyelidRight", approachAngle("eyelidRight", rightAngle, rightOpen, stepsRemaining, catchUpSteps), !isFinalStep);
+    moveServo("eyelidLeft", approachAngle("eyelidLeft", leftAngle, leftOpen, stepsRemaining, catchUpSteps), !isFinalStep);
 
     delay(stepDelayMs);
   }
@@ -648,16 +665,21 @@ void rorAnimation() {
   const int wobbleStepDelayMs = 5;  // a bit quicker than before
   const int totalWobbleSubSteps = 3 * 2 * (wobbleSteps + 1); // 3 reps, 2 directions each
   int wobbleSubStep = 0;
+  const int jawCatchUpSteps = min(12, wobbleSteps / 3); // jaw settles at the end of every sub-loop, so it catches up within each one
+  const int neck1CatchUpSteps = 12; // neck1 only settles at the very end of the whole wobble phase, so it catches up against the remaining sub-steps across all reps
 
   for (int rep = 0; rep < 3; rep++) {
     // low -> high
     for (int i = 0; i <= wobbleSteps; i++) {
       float t = easeInOutExpo((float)i / wobbleSteps);
-      int jawAngle = wobbleLow + t * (wobbleHigh - wobbleLow);
+      int jawIdeal = wobbleLow + t * (wobbleHigh - wobbleLow);
+      int jawAngle = approachAngle("jaw", jawIdeal, wobbleHigh, wobbleSteps - i, jawCatchUpSteps);
       moveServo("jaw", jawAngle, i != wobbleSteps);
 
       float neckT = easeInOutExpo((float)wobbleSubStep / (totalWobbleSubSteps - 1));
-      moveServo("neck1", neckEnd + neckT * (90 - neckEnd), wobbleSubStep != totalWobbleSubSteps - 1);
+      int neck1Ideal = neckEnd + neckT * (90 - neckEnd);
+      int neck1Angle = approachAngle("neck1", neck1Ideal, 90, totalWobbleSubSteps - 1 - wobbleSubStep, neck1CatchUpSteps);
+      moveServo("neck1", neck1Angle, wobbleSubStep != totalWobbleSubSteps - 1);
       wobbleSubStep++;
 
       delay(wobbleStepDelayMs);
@@ -665,11 +687,14 @@ void rorAnimation() {
     // high -> low
     for (int i = 0; i <= wobbleSteps; i++) {
       float t = easeInOutExpo((float)i / wobbleSteps);
-      int jawAngle = wobbleHigh + t * (wobbleLow - wobbleHigh);
+      int jawIdeal = wobbleHigh + t * (wobbleLow - wobbleHigh);
+      int jawAngle = approachAngle("jaw", jawIdeal, wobbleLow, wobbleSteps - i, jawCatchUpSteps);
       moveServo("jaw", jawAngle, i != wobbleSteps);
 
       float neckT = easeInOutExpo((float)wobbleSubStep / (totalWobbleSubSteps - 1));
-      moveServo("neck1", neckEnd + neckT * (90 - neckEnd), wobbleSubStep != totalWobbleSubSteps - 1);
+      int neck1Ideal = neckEnd + neckT * (90 - neckEnd);
+      int neck1Angle = approachAngle("neck1", neck1Ideal, 90, totalWobbleSubSteps - 1 - wobbleSubStep, neck1CatchUpSteps);
+      moveServo("neck1", neck1Angle, wobbleSubStep != totalWobbleSubSteps - 1);
       wobbleSubStep++;
 
       delay(wobbleStepDelayMs);
@@ -683,15 +708,19 @@ void rorAnimation() {
   const int returnStepDelayMs = 4; // a bit quicker than before
 
   int jawFrom = wobbleLow; // 20 (wobble always ends back at low)
+  const int jawReturnCatchUpSteps = min(12, returnSteps / 3);
 
   for (int i = 0; i <= returnSteps; i++) {
     float t = easeInOutExpo((float)i / returnSteps);
-    int jawAngle = jawFrom + t * (homeAngle - jawFrom);
+    int jawIdeal = jawFrom + t * (homeAngle - jawFrom);
     // This loop's 4ms-per-step pace is fast enough that the speed cap
     // engages hard through the curve's steep middle -- exactly what was
-    // leaving the jaw open after "ror". Bypassing the cap on only the
-    // guaranteed-exact final step (same fix as moveServosTogether())
-    // means it always actually reaches fully closed.
+    // leaving the jaw open after "ror". approachAngle() below eases it
+    // back onto target gently over the last several steps instead of
+    // leaving it all to the guaranteed-exact final step (same fix as
+    // moveServosTogether()), so it always actually reaches fully
+    // closed without a visible snap doing it.
+    int jawAngle = approachAngle("jaw", jawIdeal, homeAngle, returnSteps - i, jawReturnCatchUpSteps);
     bool isFinalStep = (i == returnSteps);
     moveServo("jaw", jawAngle, !isFinalStep);
     moveServo("neck1", homeAngle, !isFinalStep);
@@ -708,7 +737,7 @@ void rorAnimation() {
 // ============================================================
 const uint8_t MAX_GROUP_SERVOS = 8;
 
-void moveServosTogether(const char* names[], const int targets[], int count, int steps, int stepDelayMs, float easeSteepness = 20.0) {
+void moveServosTogether(const char* names[], const int targets[], int count, int steps, int stepDelayMs, float easeSteepness = DEFAULT_EASE_STEEPNESS) {
   int startAngles[MAX_GROUP_SERVOS];
   for (int c = 0; c < count; c++) {
     int idx = servoIndex(names[c]);
@@ -724,26 +753,25 @@ void moveServosTogether(const char* names[], const int targets[], int count, int
   bool freeEyeLeft = !servoInGroup("eyeLeft", names, count);
   bool freeEyeRight = !servoInGroup("eyeRight", names, count);
 
+  const int catchUpSteps = min(12, steps / 3); // spread any speed-cap lag over the last several steps instead of snapping it all onto the final one
+
   for (int i = 0; i <= steps; i++) {
     float t = easeInOutExpo((float)i / steps, easeSteepness);
     bool isFinalStep = (i == steps);
     for (int c = 0; c < count; c++) {
-      int angle = startAngles[c] + t * (targets[c] - startAngles[c]);
-      // Last step (t == 1.0, angle == the real target) bypasses the
-      // speed cap -- if the cap throttled an earlier, steeper step, the
-      // commanded position can trail a few degrees behind the curve's
-      // intended one, and nothing downstream ever asks it to close that
-      // gap on its own. This is exactly what left the jaw open after a
-      // yawn: the cap clipped its fast middle section, and by the last
-      // step it was still a few degrees short of home with nothing left
-      // to push it the rest of the way. Bypassing the cap on only this
-      // guaranteed-exact final step means every move still actually
-      // finishes at its real target.
+      int idealAngle = startAngles[c] + t * (targets[c] - startAngles[c]);
+      // approachAngle() catches a servo back up gently over the last
+      // few steps if the cap throttled it earlier in the curve, rather
+      // than leaving it all to the final step below. That final step
+      // still bypasses the cap as an exact-landing guarantee (this is
+      // what originally fixed the jaw staying open after a yawn), but
+      // now it's just closing out whatever tiny residual is left,
+      // instead of the whole accumulated gap in one uncapped jump.
+      int angle = approachAngle(names[c], idealAngle, targets[c], steps - i, catchUpSteps);
       moveServo(names[c], angle, !isFinalStep);
     }
     applyIdleSway(freeNeck1, freeNeck2, freeNeck3);
     applyIdleGaze(freeEyeLeft, freeEyeRight);
-    ArduinoOTA.handle();
     delay(stepDelayMs);
   }
 }
@@ -971,6 +999,87 @@ void neckStretchAnimation() {
 }
 
 // ============================================================
+// Look down
+// Neck1 dips down and holds, like sniffing something at ground level
+// or examining the floor -- the mirror image of "look up". No sound.
+// Type "look down" into the Serial Monitor to trigger it.
+// ============================================================
+void lookDownAnimation() {
+  const char* names[] = { "neck1" };
+  const int downTarget[] = { 135 }; // higher angle = head down on this axis
+  moveServosTogether(names, downTarget, 1, 70, 14); // slow, deliberate dip downward
+
+  idleHold(random(800, 1300), false, true, true, true, true); // hold at full dip -- doesn't touch neck2/neck3 or the eyes, so all stay free
+
+  const int homeTarget[] = { 90 };
+  moveServosTogether(names, homeTarget, 1, 70, 12);
+}
+
+// ============================================================
+// Sniff
+// A few quick, shallow head dips, like sniffing the air rapidly --
+// smaller and faster than "look down", and repeated rather than held.
+// No sound. Type "sniff" into the Serial Monitor to trigger it.
+// ============================================================
+void sniffAnimation() {
+  const char* names[] = { "neck1" };
+  const int homeTarget[] = { 90 };
+
+  int repCount = random(3, 5); // 3 or 4 -- never quite the same count twice
+  for (int rep = 0; rep < repCount; rep++) {
+    int dipTarget[] = { (int)random(98, 106) }; // a small, shallow dip -- not a full look-down, and never quite the same depth twice
+    moveServosTogether(names, dipTarget, 1, 12, 8);  // quick dip down
+    moveServosTogether(names, homeTarget, 1, 12, 8); // quick return
+  }
+}
+
+// ============================================================
+// Neck roll
+// Neck2 and neck3 sway side to side like the ambient idle sway, but
+// with a phase offset between them so the motion reads as a slow,
+// rolling stretch through the neck rather than both segments leaning
+// together in sync (which is what the ambient sway and curious tilt
+// already look like). Settles back to exact center afterward. No
+// sound. Type "neck roll" into the Serial Monitor to trigger it.
+// ============================================================
+void neckRollAnimation() {
+  const float amplitude2 = 25, amplitude3 = 15;
+  const float periodMs = 2200;
+  const int cycles = 2;
+  const unsigned long durationMs = (unsigned long)(cycles * periodMs);
+  const int stepMs = 20;
+
+  unsigned long startMillis = millis();
+  while (millis() - startMillis < durationMs) {
+    unsigned long elapsed = millis() - startMillis;
+    int neck2Angle = 90 + (int)easedOscillate(elapsed, periodMs, amplitude2);
+    int neck3Angle = 90 + (int)easedOscillate(elapsed + periodMs / 4, periodMs, amplitude3); // quarter-period offset so neck3 trails neck2 instead of mirroring it
+    moveServo("neck2", neck2Angle);
+    moveServo("neck3", neck3Angle);
+    applyIdleSway(true, false, false); // neck1 stays free -- neck2/neck3 are driven directly above
+    applyIdleGaze(true, true);
+    delay(stepMs);
+  }
+
+  const char* names[] = { "neck2", "neck3" };
+  const int homeTargets[] = { 90, 90 };
+  moveServosTogether(names, homeTargets, 2, 30, 10); // land both exactly on center
+}
+
+// ============================================================
+// Double blink
+// Two quick blinks back to back, like a surprised double-take --
+// distinct from both a single "blink" and the regular blink already
+// scheduled every few seconds in idle mode. No sound. Type "double
+// blink" into the Serial Monitor to trigger it.
+// ============================================================
+void doubleBlinkAnimation() {
+  blinkEyelids();
+  delay(120); // brief beat between the two, like a quick double-take
+  blinkEyelids();
+}
+
+// ============================================================
 // Sleepy droop
 // Eyelids ease to a heavy half-closed squint and the head droops
 // slightly, like a moment of drowsiness, then eases back up. No jaw
@@ -1015,7 +1124,6 @@ void lookAndHoldAnimation() {
   for (long waited = 0; waited < holdMs; waited += holdStepMs) {
     if (Serial.available()) break;
     applyIdleSway(true, false, false); // neck1 only -- neck2/neck3 stay held to the side
-    ArduinoOTA.handle();
     delay(holdStepMs);
   }
 
@@ -1032,14 +1140,19 @@ void lookAndHoldAnimation() {
 // 90 between the two cycles, the eyelids do one full blink.
 // Type "ror two" into the Serial Monitor to trigger it.
 //
-// Paired with mp3/0024.mp3 (sounds/ror_two.mp3) -- a single clean bark
-// from clip_07, sped up 1.5x and duplicated, with the two copies placed
-// 700ms apart so their peaks land exactly on this animation's two
-// mouth-fully-open instants (t=0.25 and t=0.75 of its 1.4s runtime).
+// Paired with mp3/0017.mp3 (sounds/clip_17.mp3) -- unlike the original
+// pairing (a single bark artificially duplicated), this one has two
+// real, distinct barks on its own, about 510ms apart (measured via
+// ffmpeg silencedetect), landing close to this animation's two
+// mouth-fully-open instants (t=0.25 and t=0.75 of its 1.4s runtime,
+// i.e. 350ms and 1050ms) -- the second lines up almost exactly (within
+// 20ms), the first is about 170ms early. No re-editing of the clip was
+// needed. mp3/0024.mp3 (the old artificially-duplicated bark) is still
+// on the SD card but no longer used by anything.
 // ============================================================
 void ror2Animation() {
   if (dfPlayerReady) {
-    dfPlayer.playMp3Folder(24);
+    dfPlayer.playMp3Folder(17);
   }
 
   const float center = 55.0;    // midpoint between 90 (up) and 20 (down)
@@ -1055,14 +1168,18 @@ void ror2Animation() {
   const float blinkEnd = 0.58;
   const int rightOpen = 58, rightClosed = 40;
   const int leftOpen = 96, leftClosed = 114;
+  const int catchUpSteps = min(12, steps / 3); // spread any speed-cap lag over the last several steps instead of snapping it all onto the final one
 
   for (int i = 0; i <= steps; i++) {
     float t = (float)i / steps;
     bool isFinalStep = (i == steps); // bypasses the speed cap so this loop always actually lands on 90, the same fix rorAnimation() needed
+    int stepsRemaining = steps - i;
 
     float wave = center + amplitude * cos(2 * PI * cycles * t);
-    int neckAngle = (int)(wave + 0.5);
-    int jawAngle = (int)(wave + 0.5);
+    int neckIdeal = (int)(wave + 0.5);
+    int jawIdeal = (int)(wave + 0.5);
+    int neckAngle = approachAngle("neck1", neckIdeal, 90, stepsRemaining, catchUpSteps);
+    int jawAngle = approachAngle("jaw", jawIdeal, 90, stepsRemaining, catchUpSteps);
 
     int rightAngle = rightOpen;
     int leftAngle = leftOpen;
@@ -1221,6 +1338,237 @@ void clip5Animation() {
 }
 
 // ============================================================
+// Clip 1 bark
+// Same envelope-driven approach as clip5Animation() -- jaw and neck1
+// track the volume envelope of clip_01.mp3, sampled in 40ms slices
+// with ffmpeg (RMS per slice, converted to dB, smoothed with a 3-frame
+// moving average, normalized against this recording's own min/max)
+// and mapped to angles the same way clip5Jaw[]/clip5Neck1[] are.
+// Eyelids do one quick blink at the recording's loudest instant
+// (~5.16s in). The main difference from clip5: neck2/neck3 sway with
+// much bigger amplitude and a faster cycle (2.5 cycles across the
+// clip instead of 1.5), reading as a deliberate side-to-side turn
+// rather than clip5's subtle background wobble.
+// Type "clip1" into the Serial Monitor to trigger it.
+//
+// This only drives the servos -- it doesn't play the audio itself
+// unless a sound module is wired up, in which case starting
+// clip_01.mp3 at the same time keeps the two in sync, since both run
+// off the same 40ms-per-frame timeline.
+// ============================================================
+const uint8_t CLIP1_FRAME_MS = 40;
+const uint8_t CLIP1_NUM_FRAMES = 157;
+
+// Jaw angle per frame: louder in the recording -> lower angle ->
+// mouth more open.
+static const uint8_t clip1Jaw[CLIP1_NUM_FRAMES] PROGMEM = {
+  86, 87, 78, 69, 61, 61, 69, 77, 85, 86, 86, 87, 81, 79, 78, 79, 79, 79, 67, 47,
+  31, 31, 36, 45, 56, 68, 74, 76, 77, 69, 55, 41, 45, 58, 72, 71, 64, 61, 65, 71,
+  73, 76, 79, 82, 83, 84, 83, 67, 51, 39, 36, 34, 29, 30, 32, 34, 37, 39, 45, 54,
+  62, 65, 68, 73, 77, 69, 62, 63, 73, 76, 75, 68, 56, 43, 41, 49, 61, 62, 55, 44,
+  39, 38, 46, 54, 67, 66, 74, 77, 88, 83, 77, 77, 82, 88, 80, 68, 51, 44, 39, 41,
+  45, 49, 56, 64, 74, 70, 66, 62, 66, 69, 69, 73, 71, 70, 71, 79, 78, 70, 57, 46,
+  39, 41, 44, 43, 36, 30, 28, 23, 20, 20, 21, 23, 23, 27, 33, 45, 57, 66, 70, 76,
+  78, 78, 79, 82, 85, 81, 77, 77, 82, 72, 64, 60, 72, 82, 85, 87, 86,
+};
+
+// Neck1 angle per frame: same shape as the jaw but smoothed with
+// extra lag, so the head follows the mouth instead of moving in
+// lockstep with it.
+static const uint8_t clip1Neck1[CLIP1_NUM_FRAMES] PROGMEM = {
+  85, 85, 84, 81, 78, 75, 75, 76, 78, 80, 81, 82, 82, 81, 81, 81, 80, 80, 78, 73,
+  66, 62, 59, 59, 60, 63, 67, 69, 72, 72, 70, 66, 64, 64, 67, 69, 69, 69, 69, 71,
+  72, 74, 75, 77, 78, 80, 81, 78, 74, 69, 64, 61, 57, 54, 53, 52, 52, 52, 53, 56,
+  59, 62, 64, 67, 70, 71, 70, 70, 72, 73, 74, 74, 71, 67, 64, 63, 64, 65, 65, 63,
+  61, 59, 58, 60, 63, 65, 68, 70, 74, 76, 77, 77, 78, 80, 80, 78, 74, 69, 65, 62,
+  61, 61, 62, 64, 67, 69, 69, 69, 70, 70, 71, 72, 73, 73, 74, 75, 76, 76, 73, 69,
+  65, 62, 61, 60, 58, 55, 52, 50, 47, 46, 44, 44, 43, 44, 45, 48, 52, 57, 61, 65,
+  69, 71, 74, 76, 78, 79, 79, 79, 80, 78, 76, 74, 74, 76, 78, 80, 81,
+};
+
+void clip1Animation() {
+  if (dfPlayerReady) {
+    dfPlayer.playMp3Folder(1); // mp3/0001.mp3 -- the recording this animation is synced to
+  }
+
+  const int rightOpen = 58, rightClosed = 40;
+  const int leftOpen = 96, leftClosed = 114;
+
+  // Blink window: centered on the loudest frame in the recording
+  // (frame 129 of 0-156, ~5.16s in) -- same 8-frames-each-way pace as
+  // clip5Animation().
+  const int blinkStartFrame = 122;
+  const int blinkCloseFrame = 130;
+  const int blinkEndFrame = 138;
+
+  for (uint8_t i = 0; i < CLIP1_NUM_FRAMES; i++) {
+    int jawAngle = pgm_read_byte(&clip1Jaw[i]);
+    int neckAngle = pgm_read_byte(&clip1Neck1[i]);
+
+    // neck2/neck3 turn back and forth throughout, independent of
+    // loudness, much more prominently than clip5Animation()'s subtle
+    // background sway (bigger amplitude, more cycles) -- a deliberate
+    // side-to-side turn rather than idle-style background life. Fades
+    // out over the last 20 frames so it settles to 90 on its own
+    // before the settle-to-home phase below takes over.
+    float t = (float)i / (CLIP1_NUM_FRAMES - 1);
+    const uint8_t swayFadeStartFrame = CLIP1_NUM_FRAMES - 20;
+    float swayFade = 1.0;
+    if (i >= swayFadeStartFrame) {
+      swayFade = 1.0 - (float)(i - swayFadeStartFrame) / (CLIP1_NUM_FRAMES - 1 - swayFadeStartFrame);
+    }
+    int neck2Angle = 90 + swayFade * 24 * sin(2 * PI * 2.5 * t);
+    int neck3Angle = 90 + swayFade * 15 * sin(2 * PI * 2.5 * t);
+
+    int rightAngle = rightOpen;
+    int leftAngle = leftOpen;
+    if (i >= blinkStartFrame && i < blinkCloseFrame) {
+      float phase = easeInOutExpo((float)(i - blinkStartFrame) / (blinkCloseFrame - blinkStartFrame));
+      rightAngle = rightOpen + phase * (rightClosed - rightOpen);
+      leftAngle = leftOpen + phase * (leftClosed - leftOpen);
+    } else if (i >= blinkCloseFrame && i < blinkEndFrame) {
+      float phase = easeInOutExpo((float)(i - blinkCloseFrame) / (blinkEndFrame - blinkCloseFrame));
+      rightAngle = rightClosed + phase * (rightOpen - rightClosed);
+      leftAngle = leftClosed + phase * (leftOpen - leftClosed);
+    }
+
+    moveServo("jaw", jawAngle);
+    moveServo("neck1", neckAngle);
+    moveServo("neck2", neck2Angle);
+    moveServo("neck3", neck3Angle);
+    moveServo("eyelidRight", rightAngle);
+    moveServo("eyelidLeft", leftAngle);
+
+    delay(CLIP1_FRAME_MS);
+  }
+
+  // Settle everything back to home once the envelope runs out, same
+  // reasoning as clip5Animation()'s settle phase.
+  const char* names1[] = { "jaw", "neck1", "neck2", "neck3", "eyelidRight", "eyelidLeft" };
+  const int targets1[] = { 90, 90, 90, 90, 58, 96 };
+  moveServosTogether(names1, targets1, 6, 60, 12);
+}
+
+// ============================================================
+// Clip2_02 bark
+// Same envelope-driven approach as clip1Animation()/clip5Animation(),
+// generated from clip2_02.mp3 (of the dragon_sound_clips2 batch) --
+// a much longer recording (10.2s, 254 frames) with a lot more dynamic
+// range in it. neck2/neck3 lean side to side even more than clip1's
+// (bigger amplitude, and a slower cycle scaled to this clip's length
+// so it reads as a deliberate tilt rather than a fast wobble) since
+// this one was specifically asked to have even more head tilting.
+// Type "clip2_02" into the Serial Monitor to trigger it.
+//
+// This only drives the servos -- it doesn't play the audio itself
+// unless a sound module is wired up, in which case starting
+// clip2_02.mp3 at the same time keeps the two in sync, since both run
+// off the same 40ms-per-frame timeline.
+// ============================================================
+const uint8_t CLIP2_02_FRAME_MS = 40;
+const uint16_t CLIP2_02_NUM_FRAMES = 254;
+
+// Jaw angle per frame: louder in the recording -> lower angle ->
+// mouth more open.
+static const uint8_t clip2_02Jaw[CLIP2_02_NUM_FRAMES] PROGMEM = {
+  72, 68, 63, 61, 67, 76, 79, 77, 77, 78, 79, 79, 78, 72, 69, 69, 77, 82, 79, 72,
+  60, 61, 46, 38, 22, 24, 24, 23, 23, 24, 25, 34, 50, 57, 56, 57, 67, 73, 74, 76,
+  80, 81, 81, 81, 82, 82, 82, 82, 80, 80, 71, 52, 32, 21, 20, 23, 30, 31, 28, 22,
+  24, 26, 28, 34, 37, 45, 53, 67, 59, 42, 24, 30, 43, 61, 72, 80, 82, 82, 84, 84,
+  85, 86, 84, 81, 78, 76, 76, 75, 62, 46, 29, 27, 34, 33, 31, 23, 23, 23, 24, 25,
+  25, 30, 44, 58, 62, 48, 35, 37, 54, 71, 80, 84, 85, 87, 86, 87, 88, 87, 85, 84,
+  85, 85, 86, 87, 87, 87, 86, 68, 46, 28, 25, 26, 28, 31, 37, 39, 45, 54, 67, 77,
+  80, 83, 84, 86, 85, 84, 82, 82, 81, 80, 72, 72, 70, 76, 70, 66, 56, 47, 39, 38,
+  41, 35, 29, 23, 23, 24, 24, 24, 24, 29, 34, 39, 50, 61, 75, 80, 84, 85, 84, 82,
+  74, 64, 56, 52, 54, 64, 77, 86, 85, 84, 85, 87, 88, 86, 83, 81, 81, 83, 86, 86,
+  87, 86, 86, 86, 88, 71, 50, 26, 22, 23, 27, 30, 30, 29, 36, 49, 61, 68, 72, 78,
+  82, 85, 85, 84, 84, 85, 86, 86, 83, 79, 75, 61, 62, 64, 77, 76, 66, 60, 46, 35,
+  24, 21, 23, 25, 26, 27, 26, 31, 44, 62, 71, 67, 60, 57,
+};
+
+// Neck1 angle per frame: same shape as the jaw but smoothed with
+// extra lag, so the head follows the mouth instead of moving in
+// lockstep with it.
+static const uint8_t clip2_02Neck1[CLIP2_02_NUM_FRAMES] PROGMEM = {
+  75, 74, 73, 72, 72, 73, 75, 76, 77, 77, 78, 78, 79, 78, 77, 76, 76, 78, 78, 77,
+  75, 73, 69, 65, 59, 55, 52, 50, 48, 46, 45, 47, 50, 54, 57, 59, 62, 65, 68, 71,
+  73, 75, 77, 78, 79, 80, 80, 81, 81, 81, 79, 75, 68, 61, 56, 52, 51, 50, 49, 47,
+  46, 46, 46, 47, 48, 50, 53, 58, 60, 59, 55, 53, 53, 57, 62, 66, 70, 73, 76, 77,
+  79, 80, 81, 81, 81, 80, 79, 79, 76, 71, 65, 60, 57, 55, 53, 50, 48, 47, 46, 45,
+  45, 45, 48, 53, 57, 57, 55, 54, 56, 61, 66, 70, 74, 77, 79, 80, 82, 83, 83, 83,
+  83, 83, 84, 84, 84, 85, 85, 81, 76, 68, 62, 57, 54, 52, 52, 52, 54, 56, 60, 65,
+  69, 72, 75, 77, 79, 80, 80, 81, 81, 81, 79, 78, 77, 77, 77, 75, 72, 69, 65, 62,
+  60, 57, 54, 51, 49, 48, 46, 45, 45, 45, 46, 48, 51, 55, 61, 66, 70, 74, 76, 77,
+  77, 75, 72, 70, 68, 68, 71, 75, 77, 78, 80, 81, 83, 83, 83, 83, 82, 82, 83, 83,
+  84, 84, 84, 84, 85, 82, 77, 69, 62, 57, 54, 52, 51, 49, 50, 52, 56, 60, 64, 68,
+  71, 74, 77, 78, 80, 81, 82, 82, 82, 82, 81, 77, 75, 74, 75, 76, 75, 73, 69, 64,
+  59, 54, 51, 49, 48, 47, 46, 47, 49, 54, 59, 62, 63, 64,
+};
+
+void clip2_02Animation() {
+  if (dfPlayerReady) {
+    dfPlayer.playMp3Folder(26); // mp3/0026.mp3 -- the recording this animation is synced to
+  }
+
+  const int rightOpen = 58, rightClosed = 40;
+  const int leftOpen = 96, leftClosed = 114;
+
+  // Blink window: centered on the loudest frame in the recording
+  // (frame 54 of 0-253, ~2.16s in) -- same 8-frames-each-way pace as
+  // clip5Animation()/clip1Animation().
+  const int blinkStartFrame = 47;
+  const int blinkCloseFrame = 55;
+  const int blinkEndFrame = 63;
+
+  for (uint16_t i = 0; i < CLIP2_02_NUM_FRAMES; i++) {
+    int jawAngle = pgm_read_byte(&clip2_02Jaw[i]);
+    int neckAngle = pgm_read_byte(&clip2_02Neck1[i]);
+
+    // neck2/neck3 lean side to side throughout, independent of
+    // loudness -- bigger amplitude and a slower cycle (scaled to this
+    // clip's longer length) than clip1Animation(), reading as a
+    // deliberate tilt rather than a quick wobble. Fades out over the
+    // last 20 frames so it settles to 90 on its own before the
+    // settle-to-home phase below takes over.
+    float t = (float)i / (CLIP2_02_NUM_FRAMES - 1);
+    const uint16_t swayFadeStartFrame = CLIP2_02_NUM_FRAMES - 20;
+    float swayFade = 1.0;
+    if (i >= swayFadeStartFrame) {
+      swayFade = 1.0 - (float)(i - swayFadeStartFrame) / (CLIP2_02_NUM_FRAMES - 1 - swayFadeStartFrame);
+    }
+    int neck2Angle = 90 + swayFade * 28 * sin(2 * PI * 3 * t);
+    int neck3Angle = 90 + swayFade * 18 * sin(2 * PI * 3 * t);
+
+    int rightAngle = rightOpen;
+    int leftAngle = leftOpen;
+    if (i >= blinkStartFrame && i < blinkCloseFrame) {
+      float phase = easeInOutExpo((float)(i - blinkStartFrame) / (blinkCloseFrame - blinkStartFrame));
+      rightAngle = rightOpen + phase * (rightClosed - rightOpen);
+      leftAngle = leftOpen + phase * (leftClosed - leftOpen);
+    } else if (i >= blinkCloseFrame && i < blinkEndFrame) {
+      float phase = easeInOutExpo((float)(i - blinkCloseFrame) / (blinkEndFrame - blinkCloseFrame));
+      rightAngle = rightClosed + phase * (rightOpen - rightClosed);
+      leftAngle = leftClosed + phase * (leftOpen - leftClosed);
+    }
+
+    moveServo("jaw", jawAngle);
+    moveServo("neck1", neckAngle);
+    moveServo("neck2", neck2Angle);
+    moveServo("neck3", neck3Angle);
+    moveServo("eyelidRight", rightAngle);
+    moveServo("eyelidLeft", leftAngle);
+
+    delay(CLIP2_02_FRAME_MS);
+  }
+
+  // Settle everything back to home once the envelope runs out, same
+  // reasoning as clip5Animation()'s settle phase.
+  const char* names2[] = { "jaw", "neck1", "neck2", "neck3", "eyelidRight", "eyelidLeft" };
+  const int targets2[] = { 90, 90, 90, 90, 58, 96 };
+  moveServosTogether(names2, targets2, 6, 60, 12);
+}
+
+// ============================================================
 // Channel scan (diagnostic)
 // Cycles through PCA9685 channels 0-15 one at a time, wiggling each
 // briefly (a small +/-12 degree nudge around center, safe for any
@@ -1352,6 +1700,10 @@ AnimationFunc idleAnimations[] = {
   sleepyBlinkAnimation,
   shakeAnimation,
   shakeChompAnimation,
+  lookDownAnimation,
+  sniffAnimation,
+  neckRollAnimation,
+  doubleBlinkAnimation,
 };
 const uint8_t NUM_IDLE_ANIMATIONS = sizeof(idleAnimations) / sizeof(idleAnimations[0]);
 
@@ -1374,6 +1726,10 @@ const uint8_t idleAnimationWeights[] = {
   4,  // sleepyBlinkAnimation (sleepy)
   3,  // shakeAnimation (shake)
   2,  // shakeChompAnimation (shake chomp)
+  6,  // lookDownAnimation (look down)
+  7,  // sniffAnimation (sniff)
+  5,  // neckRollAnimation (neck roll)
+  6,  // doubleBlinkAnimation (double blink)
 };
 
 // Picks a random idle animation, weighted by idleAnimationWeights[]
@@ -1410,6 +1766,10 @@ void printIdleAnimationName(uint8_t idx) {
     case 7: Serial.println(F("sleepy")); break;
     case 8: Serial.println(F("shake")); break;
     case 9: Serial.println(F("shake chomp")); break;
+    case 10: Serial.println(F("look down")); break;
+    case 11: Serial.println(F("sniff")); break;
+    case 12: Serial.println(F("neck roll")); break;
+    case 13: Serial.println(F("double blink")); break;
     default: Serial.println(F("?")); break;
   }
 }
@@ -1511,7 +1871,6 @@ void idleAnimation() {
       idleSwayScale = (sinceResync < fadeMs) ? easeInOutExpo((float)sinceResync / fadeMs) : 1.0;
     }
     applyIdleSway(true, true, true);
-    ArduinoOTA.handle();
 
     if (sinceResync >= nextGazeShiftAt) {
       idleGazeStartAngle = idleGazeTargetAngle; // continue from wherever the last shift landed
@@ -1547,7 +1906,6 @@ void idleAnimation() {
         idleSwayScale = dampStartScale + dampT * (0.7 - dampStartScale);
         applyIdleSway(true, true, true);
         applyIdleGaze(true, true);
-        ArduinoOTA.handle();
         delay(swayStepMs);
       }
       idleSwayScale = 0.7;
@@ -1632,6 +1990,12 @@ const char cmdName15[] PROGMEM = "look up";
 const char cmdName16[] PROGMEM = "sleepy";
 const char cmdName17[] PROGMEM = "shake";
 const char cmdName18[] PROGMEM = "shake chomp";
+const char cmdName19[] PROGMEM = "look down";
+const char cmdName20[] PROGMEM = "sniff";
+const char cmdName21[] PROGMEM = "neck roll";
+const char cmdName22[] PROGMEM = "double blink";
+const char cmdName23[] PROGMEM = "clip1";
+const char cmdName24[] PROGMEM = "clip2_02";
 
 const char cmdStart0[]  PROGMEM = "Blinking...";
 const char cmdStart1[]  PROGMEM = "Roaring...";
@@ -1652,6 +2016,12 @@ const char cmdStart15[] PROGMEM = "Looking up...";
 const char cmdStart16[] PROGMEM = "Getting sleepy...";
 const char cmdStart17[] PROGMEM = "Shaking...";
 const char cmdStart18[] PROGMEM = "Shake chomping...";
+const char cmdStart19[] PROGMEM = "Looking down...";
+const char cmdStart20[] PROGMEM = "Sniffing...";
+const char cmdStart21[] PROGMEM = "Neck rolling...";
+const char cmdStart22[] PROGMEM = "Double blinking...";
+const char cmdStart23[] PROGMEM = "Playing clip1...";
+const char cmdStart24[] PROGMEM = "Playing clip2_02...";
 
 const char cmdDone0[]  PROGMEM = "Blink done.";
 const char cmdDone1[]  PROGMEM = "Roar done.";
@@ -1672,6 +2042,12 @@ const char cmdDone15[] PROGMEM = "Look up done.";
 const char cmdDone16[] PROGMEM = "Sleepy done.";
 const char cmdDone17[] PROGMEM = "Shake done.";
 const char cmdDone18[] PROGMEM = "Shake chomp done.";
+const char cmdDone19[] PROGMEM = "Look down done.";
+const char cmdDone20[] PROGMEM = "Sniff done.";
+const char cmdDone21[] PROGMEM = "Neck roll done.";
+const char cmdDone22[] PROGMEM = "Double blink done.";
+const char cmdDone23[] PROGMEM = "Clip1 done.";
+const char cmdDone24[] PROGMEM = "Clip2_02 done.";
 
 struct SerialCommand {
   const char* name;     // PROGMEM pointer
@@ -1700,6 +2076,12 @@ const SerialCommand serialCommands[] = {
   { cmdName16, cmdStart16, cmdDone16, sleepyBlinkAnimation },
   { cmdName17, cmdStart17, cmdDone17, shakeAnimation },
   { cmdName18, cmdStart18, cmdDone18, shakeChompAnimation },
+  { cmdName19, cmdStart19, cmdDone19, lookDownAnimation },
+  { cmdName20, cmdStart20, cmdDone20, sniffAnimation },
+  { cmdName21, cmdStart21, cmdDone21, neckRollAnimation },
+  { cmdName22, cmdStart22, cmdDone22, doubleBlinkAnimation },
+  { cmdName23, cmdStart23, cmdDone23, clip1Animation },
+  { cmdName24, cmdStart24, cmdDone24, clip2_02Animation },
 };
 const uint8_t NUM_SERIAL_COMMANDS = sizeof(serialCommands) / sizeof(serialCommands[0]);
 

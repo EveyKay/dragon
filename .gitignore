@@ -18,7 +18,3 @@ __pycache__/
 # OS cruft
 .DS_Store
 Thumbs.db
-
-# WiFi/OTA credentials -- never commit real network details
-dragon_servos_15/wifi_credentials.h
-platformio_local.ini
