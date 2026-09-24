@@ -24,6 +24,18 @@ The sketch originally ran on an Arduino Uno; it was migrated to an ESP32 (see th
 
 Older sketches in `archive/` and `experiments/` are plain `.ino` files kept for reference — they aren't part of the PlatformIO build and would need their own environment if compiled again.
 
+### WiFi / OTA updates
+
+The sketch connects to WiFi at boot and, once connected, accepts new firmware over the air via `ArduinoOTA` — no USB cable needed. WiFi/OTA are optional: if the network isn't reachable within 15 seconds, setup gives up and keeps running over USB alone rather than hanging.
+
+To set it up:
+1. Copy `dragon_servos_15/wifi_credentials.h.example` to `dragon_servos_15/wifi_credentials.h` and fill in your WiFi SSID/password and a password of your choosing for OTA auth. This file is gitignored — it never gets committed.
+2. Copy `platformio_local.ini.example` (repo root) to `platformio_local.ini` and set `upload_port` to the dragon's IP address (printed to Serial at boot) or `dragon.local`, and `upload_flags`'s `--auth=` to match the OTA password from step 1. Also gitignored.
+3. Flash once over USB (`pio run -e esp32dev -t upload`) so the WiFi/OTA code is actually on the board.
+4. From then on, `pio run -e esp32dev_ota -t upload` pushes new firmware over WiFi.
+
+**Known limitation:** the ESP32 (this classic WROOM-32 variant) only supports 2.4GHz WiFi, not 5GHz. If your router uses band-steering under one SSID name (common on mesh/dual-band routers), the ESP32 may never see the network at all — check the boot log for `WiFi not connected (status 1)`, which means the SSID wasn't found in its scan, not a wrong password. Look for a 2.4GHz-specific network name, or a router setting to split the bands.
+
 ## Wiring
 
 8 servos, driven through a **PCA9685 PWM driver board over I2C** rather than directly from the microcontroller. Each servo plugs into its own channel on the PCA9685; the microcontroller just sends it angle commands over I2C.
@@ -84,7 +96,6 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 - DFPlayer GND → shared with the microcontroller and servo ground (all one common ground)
 - SD card: FAT32, with an `mp3` folder in the root containing `0001.mp3`, `0002.mp3`, etc. — `playMp3Folder(N)` plays `000N.mp3`
 - `play <N>` in the Serial Monitor tests a track directly, independent of any animation
-- **Currently unresolved on the ESP32 build**: the DFPlayer isn't being detected (`dfPlayerReady` stays `false`, so sound-triggering animations run their servo motion silently) even with TX/RX crossed correctly and both wiring and power double-checked. Doesn't block any servo/animation work — every sound-triggering animation already checks `dfPlayerReady` before attempting playback.
 
 **Speaker:** the stock/bundled speaker that ships with most DFPlayer kits is quiet even at max software volume (`dfPlayer.volume(30)`, already set in the sketch). For a louder upgrade, look for:
 
@@ -130,6 +141,6 @@ To generate a new one from another clip: run the file through a high-pass + FFT 
 | 11 | `ror two` (alternate roar) |
 | 12 | `eyes closed` / `eyes open`, `test1` smoke-test command |
 | 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw` was mounted reversed at the time); logical angle tracked in code instead of read back from the servo |
-| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly; added a hard per-servo speed cap; `flinch` removed after its fast startle snap kept making the servos seize up, replaced in the idle pool by `chomp`, `big tilt`, `look up`, and `sleepy`; added `shake` and `shake chomp`; migrated from an Arduino Uno to an ESP32 (`stress test` diagnostic command added along the way to help track down a servo power brownout); DFPlayer detection still unresolved on the new board |
+| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly; added a hard per-servo speed cap; `flinch` removed after its fast startle snap kept making the servos seize up, replaced in the idle pool by `chomp`, `big tilt`, `look up`, and `sleepy`; added `shake` and `shake chomp`; migrated from an Arduino Uno to an ESP32 (`stress test` diagnostic command added along the way to help track down a servo power brownout, and a wiring mistake tying the PCA9685's VCC to the battery rail instead of the ESP32's 3.3V pin); added WiFi + OTA firmware updates, optional and falling back to USB-only if the network isn't reachable |
 
 All prior versions are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference.

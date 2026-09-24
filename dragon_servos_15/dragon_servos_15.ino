@@ -3,6 +3,10 @@
 #include <DFRobotDFPlayerMini.h>
 #include <string.h>
 #include <stdlib.h>
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <ArduinoOTA.h>
+#include "wifi_credentials.h" // gitignored -- copy wifi_credentials.h.example and fill in your own network details
 
 // ============================================================
 // SERVO DRIVER (PCA9685, via I2C)
@@ -317,6 +321,7 @@ void idleHold(long durationMs, bool doNeck1, bool doNeck2, bool doNeck3, bool do
   const int stepMs = 20; // was 50 -- finer sampling keeps the steep sway curve looking like motion instead of a pop
   for (long waited = 0; waited < durationMs; waited += stepMs) {
     if (Serial.available()) return;
+    ArduinoOTA.handle();
     applyIdleSway(doNeck1, doNeck2, doNeck3);
     applyIdleGaze(doEyeLeft, doEyeRight);
     delay(stepMs);
@@ -389,6 +394,34 @@ void setup() {
   } else {
     Serial.println(F("DFPlayer not found -- check wiring and SD card."));
   }
+
+  // WiFi/OTA are optional -- if the network isn't reachable within the
+  // timeout, give up and keep running over USB alone rather than
+  // hanging setup() forever waiting for a connection.
+  Serial.print(F("Connecting to WiFi"));
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  unsigned long wifiStartMillis = millis();
+  const unsigned long wifiTimeoutMs = 15000;
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStartMillis < wifiTimeoutMs) {
+    delay(500);
+    Serial.print(F("."));
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print(F("WiFi connected, IP address: "));
+    Serial.println(WiFi.localIP());
+
+    ArduinoOTA.setHostname("dragon"); // reachable as dragon.local, or by the IP address printed above
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+    ArduinoOTA.begin();
+    Serial.println(F("OTA ready -- upload with `pio run -e esp32dev_ota -t upload`."));
+  } else {
+    Serial.print(F("WiFi not connected (status "));
+    Serial.print(WiFi.status()); // 1 = SSID not found, 4 = wrong password/auth failed, 6 = disconnected
+    Serial.println(F(") -- continuing without OTA (USB upload still works)."));
+  }
 }
 
 // Prints whatever the DFPlayer itself reports (errors, card events,
@@ -459,6 +492,7 @@ void checkDFPlayer() {
 }
 
 void loop() {
+  ArduinoOTA.handle();
   checkDFPlayer();
   handleSerialCommands();
 }
@@ -489,6 +523,7 @@ void blinkEyelids() {
     moveServo("eyelidLeft", leftAngle, i != steps);
     applyIdleSway(true, true, true); // blink never touches the neck or eyeballs, so all stay free
     applyIdleGaze(true, true);
+    ArduinoOTA.handle();
     delay(stepDelayMs);
   }
 
@@ -501,6 +536,7 @@ void blinkEyelids() {
     moveServo("eyelidLeft", leftAngle, i != steps);
     applyIdleSway(true, true, true);
     applyIdleGaze(true, true);
+    ArduinoOTA.handle();
     delay(stepDelayMs);
   }
 }
@@ -707,6 +743,7 @@ void moveServosTogether(const char* names[], const int targets[], int count, int
     }
     applyIdleSway(freeNeck1, freeNeck2, freeNeck3);
     applyIdleGaze(freeEyeLeft, freeEyeRight);
+    ArduinoOTA.handle();
     delay(stepDelayMs);
   }
 }
@@ -978,6 +1015,7 @@ void lookAndHoldAnimation() {
   for (long waited = 0; waited < holdMs; waited += holdStepMs) {
     if (Serial.available()) break;
     applyIdleSway(true, false, false); // neck1 only -- neck2/neck3 stay held to the side
+    ArduinoOTA.handle();
     delay(holdStepMs);
   }
 
@@ -1473,6 +1511,7 @@ void idleAnimation() {
       idleSwayScale = (sinceResync < fadeMs) ? easeInOutExpo((float)sinceResync / fadeMs) : 1.0;
     }
     applyIdleSway(true, true, true);
+    ArduinoOTA.handle();
 
     if (sinceResync >= nextGazeShiftAt) {
       idleGazeStartAngle = idleGazeTargetAngle; // continue from wherever the last shift landed
@@ -1508,6 +1547,7 @@ void idleAnimation() {
         idleSwayScale = dampStartScale + dampT * (0.7 - dampStartScale);
         applyIdleSway(true, true, true);
         applyIdleGaze(true, true);
+        ArduinoOTA.handle();
         delay(swayStepMs);
       }
       idleSwayScale = 0.7;
