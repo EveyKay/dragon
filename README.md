@@ -22,6 +22,69 @@ Terry is an animatronic Terrible Terror (from *How to Train Your Dragon*): a dra
 - [`notes/`](notes/) — earlier code drafts and scratch notes saved as `.txt`.
 - [`sounds/`](sounds/) — dog-voiced audio takes referenced by sound-synced animations in the sketch.
 
+## How to build Terry
+
+This order works best: print the head, wire the power side, wire the signals, prepare the SD card, flash the firmware, and only then fit the servos. Test after each stage.
+
+### 1. Gather the parts and print the head
+
+Everything you need is in [`BOM.csv`](BOM.csv). You'll also want a multimeter and a USB cable for the ESP32.
+
+Print the head pieces from [`CAD/dragon-head-all-pieces.stl`](CAD/dragon-head-all-pieces.stl). The Onshape document linked in [`CAD/`](CAD/) shows how the pieces fit together.
+
+### 2. Wire the power side
+
+1. Connect the battery pack to the LM2596's input. **Before connecting anything else to it**, turn its adjustment screw until a multimeter reads about 5V on the output.
+2. That output is the shared power rail. It feeds the PCA9685's `V+`, the DFPlayer's `VCC`, and the ESP32's `VIN` pin (not `VN` or `3V3`). Join all the grounds together.
+3. Put a 2200-4700uF, 25V capacitor across the PCA9685's `V+` and `GND` (long leg to `V+`). Without it, several servos starting at once can brown out the rail and the jaw servo loses its torque.
+4. Power the PCA9685's logic `VCC` from the ESP32's `3V3` pin, **not** from the rail. If your board has a jumper linking `VCC` and `V+`, remove it.
+
+### 3. Wire the signals
+
+Follow the [wiring diagram](#wiring): I2C to the PCA9685 (`GPIO21` SDA, `GPIO22` SCL), the DFPlayer's `TX`/`RX` to `GPIO32`/`GPIO33`, and the three mode buttons to `GPIO25`/`26`/`27`, each with its other leg to `GND`. Plug the servos into PCA9685 channels 2-9 as listed in the table under [Wiring](#wiring).
+
+### 4. Prepare the SD card
+
+Format a microSD card as FAT32, create a folder named `mp3` in its root, and copy these clips from [`sounds/`](sounds/) into it under their four-digit names:
+
+| File in `sounds/` | Name on the SD card | Played by |
+|---|---|---|
+| `clip_01.mp3` | `0001.mp3` | `clip1` |
+| `clip_05.mp3` | `0005.mp3` | `clip5` |
+| `clip_17.mp3` | `0017.mp3` | `ror two` |
+| `ror_burst.mp3` | `0025.mp3` | `ror` |
+| `clip2_02.mp3` | `0026.mp3` | `clip2_02` |
+
+The other files in `sounds/` (`clip_11.mp3`, `ror_two.mp3`) are older clips no animation uses any more.
+
+### 5. Flash the firmware
+
+Install [VS Code](https://code.visualstudio.com/) with the PlatformIO extension, then open this folder. In [`platformio.ini`](platformio.ini), change `upload_port` and `monitor_port` from `COM8` to your ESP32's serial port. Then run `pio run -t upload` (see [Building](#building) below). Close any open serial monitor first, or the upload can't reach the port.
+
+Open the Serial Monitor at 9600 baud. On boot Terry should snap every servo to its home position and print `DFPlayer ready.`
+
+### 6. Fit the servos
+
+Now that the electronics work, type `home` so every servo sits at 90 degrees. Attach each servo horn as close to centered as you can and mount the servos in the head. Fix any small leftover offset in software with that servo's `trim` in `servoConfigs[]` (see [Wiring](#wiring)) rather than re-seating the horn. If a servo binds at either end of its travel, narrow its safe range in the same table.
+
+### 7. Test it
+
+- `test1` runs every animation in sequence.
+- `play 1` plays a track directly, to check the audio.
+- `buttons` prints the raw state of the three button pins, to check their wiring.
+- `stress test` moves all eight servos at once, the worst case for the power rail.
+- `scan` wiggles each PCA9685 channel in turn, if a servo doesn't respond.
+
+Then try the three buttons: **idle** (ambient sway and silent gestures), **talk** (idle plus barking and roaring), and **home** (sits still).
+
+### If something goes wrong
+
+- **No servo moves at all:** check the PCA9685's `VCC` is on the ESP32's `3V3`, not on the battery rail. This exact mistake caused a long debugging session.
+- **A servo (usually the jaw) goes limp when several move at once:** the power rail is browning out. Check the bulk capacitor is installed the right way round, and use `stress test` to reproduce it.
+- **`DFPlayer not found`:** check the `TX`/`RX` wires, that the SD card is FAT32 with an `mp3` folder, and that the DFPlayer's `VCC` is on the rail.
+- **Upload fails because the port is busy:** close the serial monitor (including VS Code's PlatformIO monitor tab) and try again.
+- **A button never does anything:** you probably wired two legs from the same side of the 4-leg button. Use one leg from each side, and check it with `buttons`.
+
 ## Building
 
 The current sketch is set up as a [PlatformIO](https://platformio.org/) project (`platformio.ini` at the repo root, pointing at `firmware/dragon_servos_15/` as the source). PlatformIO IDE is installed as a VS Code extension for day-to-day editing, and the `pio` CLI works from this directory for scripted builds:
@@ -39,6 +102,10 @@ Older sketches in `archive/` and `experiments/` are plain `.ino` files kept for 
 The sketch briefly gained WiFi + OTA firmware updates (connect at boot, push new code over the air via `ArduinoOTA`), but that was removed again — not currently needed, and the extra WiFi radio activity was one more variable while chasing down hardware issues. It's straightforward to re-add later (git history has the working implementation) if it becomes useful once there's a 2.4GHz network available for it.
 
 ## Wiring
+
+![Wiring diagram: battery and LM2596 feed a shared power rail for the ESP32 (VIN), PCA9685 and DFPlayer; the ESP32 talks to the PCA9685 over I2C, to the DFPlayer over UART, and reads three mode buttons](images/wiring-diagram.svg)
+
+The **ESP32 is powered from the same LM2596 rail** as the servos and DFPlayer, through its `VIN` pin (the 5V input to its onboard regulator). Keep the rail at about 5V, never feed it into the `3V3` pin, and avoid having USB plugged in at the same time as the rail. Don't confuse `VIN` with `VN`: `VN` (GPIO39) is a 3.3V-only signal pin, and 5V there can damage the chip.
 
 8 servos, driven through a **PCA9685 PWM driver board over I2C** rather than directly from the microcontroller. Each servo plugs into its own channel on the PCA9685; the microcontroller just sends it angle commands over I2C.
 
