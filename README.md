@@ -35,6 +35,15 @@ Everything you need is in [`BOM.csv`](BOM.csv). You'll also want a multimeter an
 
 Print the head pieces from [`CAD/dragon-head-all-pieces.stl`](CAD/dragon-head-all-pieces.stl). The Onshape document linked in [`CAD/`](CAD/) shows how the pieces fit together.
 
+**Print settings:** everything was printed in PLA on a Bambu Lab printer with a 0.4 mm nozzle, using Bambu Studio's standard profile (0.20 mm layer height) with only these changes:
+
+| Parts | Infill | Supports |
+|---|---|---|
+| Head parts | 5% | On |
+| Neck parts | 15% | On |
+
+Every other setting is left at the profile default.
+
 ### 2. Wire the power side
 
 1. Connect the battery pack to the LM2596's input. **Before connecting anything else to it**, turn its adjustment screw until a multimeter reads about 5V on the output.
@@ -62,9 +71,7 @@ The other files in `sounds/` (`clip_11.mp3`, `ror_two.mp3`) are older clips no a
 
 ### 5. Flash the firmware
 
-Install [VS Code](https://code.visualstudio.com/) with the PlatformIO extension, then open this folder. In [`platformio.ini`](platformio.ini), change `upload_port` and `monitor_port` from `COM8` to your ESP32's serial port. Then run `pio run -t upload` (see [Building](#building) below). Close any open serial monitor first, or the upload can't reach the port.
-
-Open the Serial Monitor at 9600 baud. On boot Terry should snap every servo to its home position and print `DFPlayer ready.`
+Follow [Flashing the firmware](#flashing-the-firmware) below. On boot Terry should snap every servo to its home position and print `DFPlayer ready.`
 
 ### 6. Fit the servos
 
@@ -87,6 +94,36 @@ Then try the three buttons: **idle** (ambient sway and silent gestures), **talk*
 - **`DFPlayer not found`:** check the `TX`/`RX` wires, that the SD card is FAT32 with an `mp3` folder, and that the DFPlayer's `VCC` is on the rail.
 - **Upload fails because the port is busy:** close the serial monitor (including VS Code's PlatformIO monitor tab) and try again.
 - **A button never does anything:** you probably wired two legs from the same side of the 4-leg button. Use one leg from each side, and check it with `buttons`.
+
+## Flashing the firmware
+
+The firmware runs on the ESP32. You can flash it before everything else is wired, since all it needs is the ESP32 and a USB cable.
+
+**What you need**
+- A USB cable that carries data. Some cables only charge, and the ESP32 won't show up as a serial port with one of those.
+- [VS Code](https://code.visualstudio.com/) with the **PlatformIO IDE** extension. PlatformIO downloads the ESP32 toolchain and the two libraries (Adafruit PWM Servo Driver and DFRobotDFPlayerMini) automatically the first time you build.
+- A USB-serial driver, if your computer doesn't recognize the board. Which one depends on the chip on your board (usually CP210x or CH340).
+
+**Steps**
+1. Clone or download this repo and open the folder in VS Code. Let PlatformIO finish its first-time setup (a few minutes, needs internet).
+2. Plug the ESP32 into your computer.
+3. Find its serial port. On Windows, open Device Manager and look under **Ports (COM & LPT)**; unplug and replug the board to see which entry appears. On Mac or Linux it looks like `/dev/ttyUSB0` or `/dev/cu.usbserial-...`. Running `pio device list` also shows it.
+4. Open [`platformio.ini`](platformio.ini) and change `upload_port` and `monitor_port` from `COM8` to your port. (They're pinned because PlatformIO's auto-detect once picked the wrong port. You can delete both lines to let it auto-detect instead.)
+5. Close any open serial monitor, including VS Code's PlatformIO monitor tab. It holds the port, and the upload fails while it's open.
+6. Flash it: click the **Upload** arrow (→) in the blue PlatformIO bar at the bottom of VS Code, or run this in a terminal in the repo folder:
+
+   ```
+   pio run -t upload
+   ```
+
+7. Wait for `[SUCCESS]` and `Hard resetting via RTS pin...` at the end of the output. The board reboots by itself.
+8. Open the serial monitor (the plug icon in the bottom bar, or `pio device monitor`) at 9600 baud. You should see each servo being attached, then `Dragon servo setup complete.` and `DFPlayer ready.` If the DFPlayer isn't wired up yet, you'll see `DFPlayer not found` instead, which is expected until it is.
+
+**If the upload won't start**
+- **Stuck on `Connecting......`:** hold the board's **BOOT** button while it says that, and release it once the upload starts. Some ESP32 boards need this.
+- **`could not open port` or `Access is denied`:** something else has the port open. Close the serial monitor or any other program using it.
+- **No port appears at all:** try a different USB cable, then a different USB port, then install the USB-serial driver for your board's chip.
+- **Wrong port:** double-check step 3, and make sure `upload_port` in `platformio.ini` matches it.
 
 ## Building
 
