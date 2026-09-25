@@ -8,6 +8,7 @@ Terry is an animatronic Terrible Terror (from *How to Train Your Dragon*): a dra
 
 ![Terry's 3D-printed head with the eye, servos and jaw frame visible](images/terry-head.jpg)
 
+- Demo video (1:37): [`videos/terry-demo.mp4`](videos/terry-demo.mp4)
 - Bill of materials: [`BOM.csv`](BOM.csv)
 - CAD (Onshape link and STEP export): [`CAD/`](CAD/)
 - Wiring: see [Wiring](#wiring) below
@@ -15,6 +16,8 @@ Terry is an animatronic Terrible Terror (from *How to Train Your Dragon*): a dra
 ## Repository layout
 
 - [`BOM.csv`](BOM.csv) — bill of materials.
+- [`videos/`](videos/) — the demo video.
+- [`images/`](images/) — the photo and the wiring diagram used in this README.
 - [`CAD/`](CAD/) — Onshape link and the STEP assembly export.
 - [`firmware/`](firmware/dragon_servos_15/dragon_servos_15.ino) — the current sketch (`firmware/dragon_servos_15/dragon_servos_15.ino`), the latest version.
 - [`archive/`](archive/) — superseded versions 1–13, kept for history.
