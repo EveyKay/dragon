@@ -1,10 +1,22 @@
 # Dragon
 
-Arduino sketches driving the servos for an animatronic dragon head: eyes, eyelids, jaw, and a three-segment neck.
+Terry is an animatronic Terrible Terror (from *How to Train Your Dragon*): a dragon head with moving eyes, eyelids, a jaw, and a three-segment neck, plus a speaker for sound.
+
+**What it does:** an ESP32 drives 8 servos through a PCA9685 driver board and plays dog-voiced sound clips from a DFPlayer Mini. It can run scripted animations (roars, head tilts, yawns, sniffs), sound-synced animations whose jaw and neck motion is generated from the recording's volume, and three physical modes: **idle** (ambient sway, blinking and random silent gestures), **talk** (idle plus barking and roaring), and **home** (sits still at rest). Three buttons switch between them.
+
+**Why I made it:** I wanted a dragon that feels alive rather than one that just replays canned motions, so most of the work went into smoothing the movement and syncing the jaw to real audio.
+
+<!-- Add photos here: ![Terry, finished](images/terry.jpg) -->
+
+- Bill of materials: [`BOM.csv`](BOM.csv)
+- CAD (Onshape link and STEP export): [`CAD/`](CAD/)
+- Wiring: see [Wiring](#wiring) below
 
 ## Repository layout
 
-- [`dragon_servos_15/`](dragon_servos_15/dragon_servos_15.ino) — current sketch, the latest version.
+- [`BOM.csv`](BOM.csv) — bill of materials.
+- [`CAD/`](CAD/) — Onshape link and the STEP assembly export.
+- [`firmware/`](firmware/dragon_servos_15/dragon_servos_15.ino) — the current sketch (`firmware/dragon_servos_15/dragon_servos_15.ino`), the latest version.
 - [`archive/`](archive/) — superseded versions 1–13, kept for history.
 - [`experiments/`](experiments/) — one-off test sketches not part of the main dragon build.
 - [`notes/`](notes/) — earlier code drafts and scratch notes saved as `.txt`.
@@ -12,7 +24,7 @@ Arduino sketches driving the servos for an animatronic dragon head: eyes, eyelid
 
 ## Building
 
-The current sketch is set up as a [PlatformIO](https://platformio.org/) project (`platformio.ini` at the repo root, pointing at `dragon_servos_15/` as the source). PlatformIO IDE is installed as a VS Code extension for day-to-day editing, and the `pio` CLI works from this directory for scripted builds:
+The current sketch is set up as a [PlatformIO](https://platformio.org/) project (`platformio.ini` at the repo root, pointing at `firmware/dragon_servos_15/` as the source). PlatformIO IDE is installed as a VS Code extension for day-to-day editing, and the `pio` CLI works from this directory for scripted builds:
 
 ```
 pio run              # compile
@@ -20,7 +32,7 @@ pio run -t upload    # compile and flash to the ESP32
 pio device monitor    # open the serial monitor at 9600 baud
 ```
 
-The sketch originally ran on an Arduino Uno; it was migrated to an ESP32 (see the version history below) for far more flash/RAM headroom, more GPIO for the planned physical buttons, and a free hardware UART for the DFPlayer instead of `SoftwareSerial`. The Uno version (and its `platformio.ini`) is still available in git history (commit `fe84b30` and earlier) if ever needed again.
+The sketch originally ran on an Arduino Uno; it was migrated to an ESP32 (see the version history below) for far more flash/RAM headroom, more GPIO for the physical mode buttons, and a free hardware UART for the DFPlayer instead of `SoftwareSerial`. The Uno version (and its `platformio.ini`) is still available in git history (commit `fe84b30` and earlier) if ever needed again.
 
 Older sketches in `archive/` and `experiments/` are plain `.ino` files kept for reference — they aren't part of the PlatformIO build and would need their own environment if compiled again.
 
@@ -53,6 +65,16 @@ Channels, home angles, safe ranges, and trims are all defined in one place at th
 
 If your board's channels aren't numbered, type `scan` into the Serial Monitor: it cycles through channels 0–15, wiggling each one briefly and printing its number, so you can watch which physical connector moves and match it up.
 
+**Mode buttons:** three momentary pushbuttons trigger `idle`/`talk`/`home` without needing the Serial Monitor open. Each one wires between its GPIO and a shared `GND` — no external resistor needed, since the sketch enables the ESP32's internal pull-up on each pin (`INPUT_PULLUP`), so the pin reads HIGH normally and LOW the instant it's pressed. Debouncing is handled in software (`checkModeButtons()`).
+
+| Button | ESP32 pin |
+|---|---|
+| idle | `GPIO25` |
+| talk | `GPIO26` |
+| home | `GPIO27` |
+
+Pressing a button while idle/talk mode is already running interrupts it and switches straight to the newly-pressed mode, the same way typing a different command into the Serial Monitor would.
+
 ### Controlling it
 
 Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL & CR"). Commands:
@@ -79,7 +101,11 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 - `double blink` — two quick blinks back to back, like a surprised double-take, no sound
 - `clip5` — servo motion generated from [`sounds/clip_05.mp3`](sounds/clip_05.mp3)'s volume envelope (see below)
 - `clip1` — same envelope-driven approach as `clip5`, generated from [`sounds/clip_01.mp3`](sounds/clip_01.mp3), but with much bigger and faster neck2/neck3 side-to-side motion (see below)
+- `clip2_02` — same envelope-driven approach, generated from [`sounds/clip2_02.mp3`](sounds/clip2_02.mp3) (a longer, 10.2s recording), with even more pronounced neck2/neck3 tilt than `clip1`
 - `idle` — ambient idle mode: continuous neck sway, regular blinking, occasional bigger animations and "freeze" pauses, all randomized, no sound (see below); type anything to stop it
+- `talk` — same ambient engine as `idle`, but its pool of bigger animations also includes the sound-synced ones (`ror`, `ror two`, `clip5`, `clip1`, `clip2_02`), so the dragon can spontaneously bark/roar on its own instead of only doing silent gestures (see below); type anything to stop it
+- `home` — eases every servo to its home angle and holds there, no ambient sway or animations at all -- a deliberate "at rest" state, unlike `idle`/`talk`; also triggerable from its own physical button (see Wiring)
+- `buttons` — diagnostic: for 15 seconds, prints the raw state of the three mode-button pins (`1` = released, `0` = pressed), for checking button wiring
 - `scan` — diagnostic: cycles PCA9685 channels 0–15, wiggling and announcing each one, for figuring out physical wiring on an unlabeled board
 - `stress test` — diagnostic: all 8 servos twitch ±12° around home in sync, back and forth, for as long as it runs -- the worst case for the shared servo power rail (every servo accelerates at once on every direction change), meant for reproducing/metering a power brownout rather than looking natural; type anything to stop it
 - `test1` — runs every animation above in sequence, for a quick smoke test after rewiring
@@ -102,14 +128,20 @@ Open the Serial Monitor at 9600 baud (line ending set to "Newline" or "Both NL &
 
 If a speaker swap still isn't loud enough, the next step up is a small external amplifier (e.g. a PAM8403-based board) between the DFPlayer's line-level output and the speaker, bypassing the onboard amp's power ceiling entirely.
 
-### Idle mode
+### Idle mode (and talk mode)
 
-`idleAnimation()` (the `idle` command) is meant to make the dragon look alive with no operator input and no sound — the long-term plan is a physical button wired to trigger this, alongside separate "off" and "full random including sound" buttons. It layers several independent, randomly-timed behaviors:
+`idleAnimation()` (the `idle` command, or its own physical button — see Wiring) is meant to make the dragon look alive with no operator input and no sound. It layers several independent, randomly-timed behaviors:
 
 - **Ambient sway** — `neck1`/`neck2`/`neck3` sway continuously, each on a different period so the combined motion doesn't look like a robotic uniform wobble.
 - **Regular blinking** — every 3–6 seconds, independent of everything else.
 - **Bigger animations** — every 10–20 seconds, one of `tilt` / `yawn` / `look around` / `look hold` / `chomp` / `big tilt` / `look up` / `sleepy` / `shake` / `shake chomp` / `look down` / `sniff` / `neck roll` / `double blink` fires, weighted so small/cheap gestures (`tilt`, `look around`, `chomp`, `sniff`) come up far more often than the dramatic ones (`big tilt`, `shake`, `shake chomp`), and never the same one twice in a row. Deliberately excludes "stateful" animations (`eyes closed`, `look right`/`look left`) that move somewhere and stay, since a random pick landing on one of those and not revisiting it for a while would look broken rather than alive. Also excludes `flinch`, which was removed after the servos would occasionally seize up on its fast startle snap.
 - **Freezes** — every 6–10 seconds (between the blink and big-animation cadence), the sway eases down to a dead stop for 2–4 seconds, then eases back up — just a moment of stillness before it keeps moving.
+
+`talkAnimation()` (the `talk` command, or its own physical button) is `runIdleLikeMode()` — the shared engine behind both modes — fed a bigger pool: everything idle mode can do, plus `ror`, `ror two`, `clip5`, `clip1`, and `clip2_02`, weighted so a "bigger animation" slot lands on one of the sound animations close to half the time (idle's 14 silent gestures sum to a weight of 81; the 5 sound ones sum to 75). Everything else (sway, gaze, blinking, freezes, jitter) behaves identically to idle mode.
+
+`homeAnimation()` (the `home` command, or its own physical button) is the plain "off" state: it eases every servo to its configured home angle and returns immediately, with no sway or animation of any kind afterward. Unlike idle/talk it isn't a blocking loop, so there's nothing running that a later button press or command would need to interrupt.
+
+Pressing a mode button while idle/talk is already running switches modes immediately, the same way typing a different Serial command would. This works because `checkModeButtons()` (debounced, latching whichever button was freshly pressed into a `pendingMode` global) is polled everywhere idle/talk's ambient loop and holds already check `Serial.available()` to know they should stop — both are now considered together via a shared `stopRequested()` — and `handleModeButtons()` in `loop()` dispatches to the newly-pending mode right after the interrupted one finishes unwinding.
 
 The sway doesn't actually stop while a blink or bigger animation plays — `moveServosTogether()` drives whichever neck/eye axis a given call isn't already using itself (at full amplitude under a blink, since blinking never touches the neck; at a lessened amplitude under a bigger animation, since that one *is* actively steering some of those axes). This only activates while idle mode has set a global flag, so it's a no-op for any animation triggered directly from the Serial Monitor.
 
@@ -136,6 +168,6 @@ To generate a new one from another clip: decode it to raw PCM with `ffmpeg` (`-a
 | 11 | `ror two` (alternate roar) |
 | 12 | `eyes closed` / `eyes open`, `test1` smoke-test command |
 | 13 | Per-servo `reversed` flag for backwards-mounted servos (`jaw` was mounted reversed at the time); logical angle tracked in code instead of read back from the servo |
-| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly; added a hard per-servo speed cap; `flinch` removed after its fast startle snap kept making the servos seize up, replaced in the idle pool by `chomp`, `big tilt`, `look up`, and `sleepy`; added `shake` and `shake chomp`; migrated from an Arduino Uno to an ESP32 (`stress test` diagnostic command added along the way to help track down a servo power brownout, fixed with a bulk capacitor across the PCA9685's V+/GND, plus a wiring mistake tying the PCA9685's VCC to the battery rail instead of the ESP32's 3.3V pin); briefly added and then removed WiFi + OTA firmware updates (not currently needed, still in git history if useful later); fixed a lingering DFPlayer disconnection; smoothed out a snap at the end of moves by spreading any speed-cap lag over several steps instead of one, and gentled the default ease curve; slowed neck1's idle sway so it doesn't read as repeated nodding; added `look down`, `sniff`, `neck roll`, and `double blink`; replaced `ror two`'s sound with `clip_17` (has two natural barks of its own, unlike the original artificially-duplicated single bark); replaced `ror`'s sound with `ror_burst.mp3`, a single sharp bark extracted and boosted from a longer recording (`dragon_sound_clips2/clip2_10.mp3`); added `clip1`, a second envelope-driven animation (generated from `clip_01.mp3` with a proper ffmpeg RMS analysis) with much bigger neck2/neck3 turning than `clip5` |
+| 15 | Jaw remounted normally, so the `reversed` flag is dropped again; roar animation (`ror`) and its jaw wobble/return phases run a bit quicker than in v13; later given a DFPlayer Mini for sound (`clip5`, `play <N>`), then migrated from the `Servo` library to a PCA9685 driver board to fix an interrupt conflict between `Servo` and the DFPlayer's `SoftwareSerial` connection; added sound-free animations (`tilt`, `yawn`, `look around`, `flinch`, `look hold`) and an `idle` mode that layers ambient sway, blinking, freezes, and those animations together randomly; added a hard per-servo speed cap; `flinch` removed after its fast startle snap kept making the servos seize up, replaced in the idle pool by `chomp`, `big tilt`, `look up`, and `sleepy`; added `shake` and `shake chomp`; migrated from an Arduino Uno to an ESP32 (`stress test` diagnostic command added along the way to help track down a servo power brownout, fixed with a bulk capacitor across the PCA9685's V+/GND, plus a wiring mistake tying the PCA9685's VCC to the battery rail instead of the ESP32's 3.3V pin); briefly added and then removed WiFi + OTA firmware updates (not currently needed, still in git history if useful later); fixed a lingering DFPlayer disconnection; smoothed out a snap at the end of moves by spreading any speed-cap lag over several steps instead of one, and gentled the default ease curve; slowed neck1's idle sway so it doesn't read as repeated nodding; added `look down`, `sniff`, `neck roll`, and `double blink`; replaced `ror two`'s sound with `clip_17` (has two natural barks of its own, unlike the original artificially-duplicated single bark); replaced `ror`'s sound with `ror_burst.mp3`, a single sharp bark extracted and boosted from a longer recording (`dragon_sound_clips2/clip2_10.mp3`); added `clip1`, a second envelope-driven animation (generated from `clip_01.mp3` with a proper ffmpeg RMS analysis) with much bigger neck2/neck3 turning than `clip5`; added `clip2_02`, a third envelope-driven animation (generated from `clip2_02.mp3`) with even more neck2/neck3 tilt; added `talk` mode, sharing idle mode's ambient sway/blink/freeze engine (refactored into `runIdleLikeMode()`) but drawing from a bigger pool that also includes the sound-synced animations, later reweighted so sound comes up close to half the time; added `home` mode (eases to home and holds, no sway/animation) and three physical mode buttons (`GPIO25`/`26`/`27`, internal pull-ups) that trigger `idle`/`talk`/`home` and can interrupt whichever mode is currently running |
 
 All prior versions are archived in [`archive/`](archive/) rather than deleted, so earlier animation timings/approaches stay available for reference.

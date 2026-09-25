@@ -1,0 +1,15 @@
+Item Name,Qty,Price (total) (USD),Item link,Notes
+ESP32 dev board (ESP32-WROOM-32),1,,,"Main controller. ESP32-D0WD-V3, 3.3V logic. Runs the dragon firmware"
+PCA9685 16-channel PWM servo driver,1,,,"I2C (SDA=GPIO21, SCL=GPIO22). Drives all 8 servos on channels 2-9. VCC to ESP32 3.3V, V+ to servo power"
+Hobby servo,8,,,"Eyes x2, eyelids x2, jaw, neck x3. Standard analog hobby servos - add exact model"
+DFPlayer Mini MP3 module,1,,,"Plays the sound clips. TX=GPIO32, RX=GPIO33 (UART2)"
+microSD card,1,,,"FAT32. Clips go in an mp3/ folder as 0001.mp3, 0002.mp3, etc. (see sounds/)"
+Speaker (4 ohm ~3W enclosed),1,,,"Add exact model. Enclosed 4 ohm 3W is much louder than the bundled DFPlayer speaker"
+LM2596 buck converter module,1,,,"Steps the battery voltage down to power the servos and DFPlayer"
+Battery pack,1,,,"Add type and voltage. Feeds the LM2596"
+Electrolytic capacitor 2200-4700uF 25V,1,,,"Bulk capacitor across the PCA9685 V+ and GND. Fixed servo brownouts (jaw losing torque) under load"
+Tactile pushbutton (4-leg),3,,,"Mode buttons: idle GPIO25, talk GPIO26, home GPIO27. Wired to GND, uses internal pull-ups"
+Mini breadboard,1,,,"Power distribution for battery and ground"
+Jumper wires,1,,,"Add quantity and type"
+,,,,
+Total Price (USD):,,,,

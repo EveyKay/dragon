@@ -61,6 +61,99 @@ DFRobotDFPlayerMini dfPlayer;
 bool dfPlayerReady = false;
 
 // ============================================================
+// MODE BUTTONS
+// Three momentary pushbuttons, each wired between its GPIO and GND.
+// INPUT_PULLUP means the pin reads HIGH when the button is untouched
+// and LOW the instant it's pressed, so no external resistor is needed.
+// GPIO25/26/27 were picked because they're plain digital-capable pins
+// with no boot-strapping role and no overlap with the I2C (21/22) or
+// DFPlayer UART (32/33) pins used elsewhere.
+// ============================================================
+const uint8_t BUTTON_IDLE_PIN = 25;
+const uint8_t BUTTON_TALK_PIN = 26;
+const uint8_t BUTTON_HOME_PIN = 27;
+
+// -1 = no mode change pending. Set the instant a button's press is
+// confirmed (see checkModeButtons() below); consumed once, right
+// before dispatching, by handleModeButtons() in loop().
+enum ModeRequest { MODE_NONE = -1, MODE_IDLE = 0, MODE_TALK = 1, MODE_HOME = 2 };
+int8_t pendingMode = MODE_NONE;
+
+struct ModeButton {
+  uint8_t pin;
+  int8_t mode;         // which ModeRequest this button requests when pressed
+  bool lastReading;     // raw digitalRead() from the previous poll, for edge detection
+  bool debouncedState;  // the reading once it's held stable past BUTTON_DEBOUNCE_MS
+  unsigned long lastChangeMillis;
+};
+
+ModeButton modeButtons[] = {
+  { BUTTON_IDLE_PIN, MODE_IDLE, HIGH, HIGH, 0 },
+  { BUTTON_TALK_PIN, MODE_TALK, HIGH, HIGH, 0 },
+  { BUTTON_HOME_PIN, MODE_HOME, HIGH, HIGH, 0 },
+};
+const uint8_t NUM_MODE_BUTTONS = sizeof(modeButtons) / sizeof(modeButtons[0]);
+const unsigned long BUTTON_DEBOUNCE_MS = 30;
+
+// Polls all three buttons and debounces each one independently. The
+// instant a button's reading settles LOW (pressed) after being stable
+// for BUTTON_DEBOUNCE_MS, latches its mode into pendingMode and returns
+// true. Cheap enough (three digitalReads and some comparisons) to call
+// from inside any blocking loop -- idle/talk's ambient engine, a
+// stress test, a held pose -- the exact same way those loops already
+// poll Serial.available() to notice they should stop.
+bool checkModeButtons() {
+  bool pressed = false;
+  for (uint8_t i = 0; i < NUM_MODE_BUTTONS; i++) {
+    bool reading = digitalRead(modeButtons[i].pin);
+    if (reading != modeButtons[i].lastReading) {
+      modeButtons[i].lastChangeMillis = millis();
+      modeButtons[i].lastReading = reading;
+    }
+    if (millis() - modeButtons[i].lastChangeMillis > BUTTON_DEBOUNCE_MS && reading != modeButtons[i].debouncedState) {
+      modeButtons[i].debouncedState = reading;
+      if (reading == LOW) { // pull-up idles HIGH, so LOW means freshly pressed
+        pendingMode = modeButtons[i].mode;
+        pressed = true;
+      }
+    }
+  }
+  return pressed;
+}
+
+// The one thing every blocking loop in this sketch (idle/talk mode,
+// the stress test, a held pose) needs to know: has anything happened
+// that means it should stop? Either a Serial command came in, or a
+// mode button was just pressed -- both are treated as "stop whatever
+// is running," with the actual mode switch (if it was a button) then
+// carried out by handleModeButtons() once control returns to loop().
+bool stopRequested() {
+  bool buttonPressed = checkModeButtons(); // always poll, so debounce timing stays accurate even if Serial already has data
+  return Serial.available() || buttonPressed;
+}
+
+// Called every loop() tick. Polls the buttons itself (in case nothing
+// else happened to be running to poll them via stopRequested()), and
+// once a press has latched a pendingMode, consumes it and dispatches
+// to the matching mode -- idle/talk are the same blocking loops the
+// "idle"/"talk" Serial commands trigger, so pressing a different
+// button while one is already running interrupts it exactly like
+// typing a new command would, via the very same stopRequested() checks
+// inside them.
+void handleModeButtons() {
+  checkModeButtons();
+  if (pendingMode == MODE_NONE) return;
+
+  int8_t mode = pendingMode;
+  pendingMode = MODE_NONE; // consume before dispatching, so a fresh press mid-mode can latch its own new request
+  switch (mode) {
+    case MODE_IDLE: idleAnimation(); break;
+    case MODE_TALK: talkAnimation(); break;
+    case MODE_HOME: homeAnimation(); break;
+  }
+}
+
+// ============================================================
 // SERVO-TO-PIN CONFIGURATION
 // This is the ONLY section you should need to edit when you
 // add, remove, or rewire a servo. Everything below reads from
@@ -357,7 +450,7 @@ void applyIdleGaze(bool doEyeLeft, bool doEyeRight) {
 void idleHold(long durationMs, bool doNeck1, bool doNeck2, bool doNeck3, bool doEyeLeft, bool doEyeRight) {
   const int stepMs = 20; // was 50 -- finer sampling keeps the steep sway curve looking like motion instead of a pop
   for (long waited = 0; waited < durationMs; waited += stepMs) {
-    if (Serial.available()) return;
+    if (stopRequested()) return;
     applyIdleSway(doNeck1, doNeck2, doNeck3);
     applyIdleGaze(doEyeLeft, doEyeRight);
     delay(stepMs);
@@ -401,6 +494,18 @@ void setup() {
   Serial.begin(9600);
 
   randomSeed(analogRead(34)); // GPIO34 is unconnected -- floating-pin noise seeds curiousTiltAnimation()'s side pick
+
+  for (uint8_t i = 0; i < NUM_MODE_BUTTONS; i++) {
+    pinMode(modeButtons[i].pin, INPUT_PULLUP);
+    // Seed both debounce fields from a real initial read instead of the
+    // hardcoded HIGH default -- if a button happened to be held down at
+    // boot, this treats that as its resting state rather than firing a
+    // spurious "just pressed" edge the first time checkModeButtons() runs.
+    bool initial = digitalRead(modeButtons[i].pin);
+    modeButtons[i].lastReading = initial;
+    modeButtons[i].debouncedState = initial;
+    modeButtons[i].lastChangeMillis = millis();
+  }
 
   Wire.begin(21, 22); // SDA, SCL
   pwm.begin();
@@ -500,6 +605,7 @@ void checkDFPlayer() {
 void loop() {
   checkDFPlayer();
   handleSerialCommands();
+  handleModeButtons();
 }
 
 // ============================================================
@@ -1122,7 +1228,7 @@ void lookAndHoldAnimation() {
   long holdMs = random(5000, 12000);
   const int holdStepMs = 100;
   for (long waited = 0; waited < holdMs; waited += holdStepMs) {
-    if (Serial.available()) break;
+    if (stopRequested()) break;
     applyIdleSway(true, false, false); // neck1 only -- neck2/neck3 stay held to the side
     delay(holdStepMs);
   }
@@ -1622,10 +1728,10 @@ void twitchStressTest() {
     lowTargets[i] = servoConfigs[idx].homeAngle - twitchAmplitude;
   }
 
-  Serial.println(F("Twitch stress test running -- type anything to stop."));
-  while (!Serial.available()) {
+  Serial.println(F("Twitch stress test running -- type anything or press a mode button to stop."));
+  while (!stopRequested()) {
     moveServosTogether(names, highTargets, NUM_SERVOS, 20, 10);
-    if (Serial.available()) break;
+    if (stopRequested()) break;
     moveServosTogether(names, lowTargets, NUM_SERVOS, 20, 10);
   }
 
@@ -1634,7 +1740,32 @@ void twitchStressTest() {
 }
 
 // ============================================================
-// Idle mode
+// Home mode
+// The opposite of idle/talk mode: eases every servo to its configured
+// home angle and then just holds there -- no ambient sway, no
+// blinking, no animations of any kind, nothing. A deliberate "at rest"
+// state for when the dragon shouldn't be doing anything on its own.
+// Unlike idle/talk mode this isn't a blocking loop -- it moves to home
+// once and returns immediately, so there's nothing further to
+// interrupt. Type "home" into the Serial Monitor, or press the home
+// button, to trigger it.
+// ============================================================
+void homeAnimation() {
+  Serial.println(F("Going home..."));
+
+  const char* names[NUM_SERVOS];
+  int targets[NUM_SERVOS];
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    names[i] = servoConfigs[i].name;
+    targets[i] = servoConfigs[i].homeAngle;
+  }
+  moveServosTogether(names, targets, NUM_SERVOS, 70, 12);
+
+  Serial.println(F("Home."));
+}
+
+// ============================================================
+// Idle mode (and its sibling, talk mode)
 // Randomly runs "self-returning" animations -- ones that do their
 // thing and settle back to home on their own -- with a 10-20 second
 // gap between each, to make the dragon look alive when nothing else
@@ -1642,7 +1773,14 @@ void twitchStressTest() {
 // eyesClosedAnimation() or lookRightAnimation() that move somewhere
 // and stay there, since a random pick landing on one of those and
 // not revisiting it for a while would look broken/stuck rather than
-// alive. Never triggers sound.
+// alive. Idle mode's pool never triggers sound.
+//
+// Talk mode (talkAnimation(), "talk" on the Serial Monitor) is the
+// exact same ambient engine below, just fed talkAnimations[] instead
+// of idleAnimations[] -- a pool that also includes the sound-synced
+// animations (ror, ror two, clip5, clip1, clip2_02), so the dragon can
+// spontaneously bark/roar on its own instead of only ever doing silent
+// gestures. See runIdleLikeMode() below, which both modes call into.
 //
 // The neck sways continuously in the background -- a different
 // period on each of the three neck servos so the combined motion
@@ -1732,23 +1870,80 @@ const uint8_t idleAnimationWeights[] = {
   6,  // doubleBlinkAnimation (double blink)
 };
 
-// Picks a random idle animation, weighted by idleAnimationWeights[]
-// and never the same one that just played (excludeIdx, or -1 to not
-// exclude anything) -- back-to-back repeats of the exact same gesture
-// read as glitchy/looping rather than alive, even with everything else
-// randomized.
-uint8_t pickWeightedIdleAnimation(int8_t excludeIdx) {
+// ============================================================
+// Talk mode's pool
+// Everything idle mode can do, plus the sound-synced animations --
+// so "talk" looks exactly like idle mode the rest of the time, but
+// can also spontaneously bark/roar instead of only ever doing silent
+// gestures. Weighted at 15 apiece (idle's 14 silent gestures sum to
+// 81, so the 5 sound animations summing to 75 land a "big animation"
+// slot on sound close to half the time -- the whole point of "talk"
+// mode over plain idle) -- easy to retune per-clip below if one should
+// come up more/less than the others.
+// ============================================================
+AnimationFunc talkAnimations[] = {
+  curiousTiltAnimation,
+  yawnAnimation,
+  lookAroundAnimation,
+  lookAndHoldAnimation,
+  quickChompsAnimation,
+  bigTiltAnimation,
+  neckStretchAnimation,
+  sleepyBlinkAnimation,
+  shakeAnimation,
+  shakeChompAnimation,
+  lookDownAnimation,
+  sniffAnimation,
+  neckRollAnimation,
+  doubleBlinkAnimation,
+  rorAnimation,
+  ror2Animation,
+  clip5Animation,
+  clip1Animation,
+  clip2_02Animation,
+};
+const uint8_t NUM_TALK_ANIMATIONS = sizeof(talkAnimations) / sizeof(talkAnimations[0]);
+
+const uint8_t talkAnimationWeights[] = {
+  10, // curiousTiltAnimation (tilt)
+  6,  // yawnAnimation (yawn)
+  8,  // lookAroundAnimation (look around)
+  7,  // lookAndHoldAnimation (look hold)
+  8,  // quickChompsAnimation (chomp)
+  3,  // bigTiltAnimation (big tilt)
+  6,  // neckStretchAnimation (look up)
+  4,  // sleepyBlinkAnimation (sleepy)
+  3,  // shakeAnimation (shake)
+  2,  // shakeChompAnimation (shake chomp)
+  6,  // lookDownAnimation (look down)
+  7,  // sniffAnimation (sniff)
+  5,  // neckRollAnimation (neck roll)
+  6,  // doubleBlinkAnimation (double blink)
+  15, // rorAnimation (ror)
+  15, // ror2Animation (ror two)
+  15, // clip5Animation (clip5)
+  15, // clip1Animation (clip1)
+  15, // clip2_02Animation (clip2_02)
+};
+
+// Picks a random animation from the given pool, weighted by the
+// parallel weights[] array, and never the same one that just played
+// (excludeIdx, or -1 to not exclude anything) -- back-to-back repeats
+// of the exact same gesture read as glitchy/looping rather than alive,
+// even with everything else randomized. Shared by idle mode and talk
+// mode, which differ only in which pool/weights they pass in.
+uint8_t pickWeightedAnimation(const uint8_t weights[], uint8_t count, int8_t excludeIdx) {
   uint16_t totalWeight = 0;
-  for (uint8_t i = 0; i < NUM_IDLE_ANIMATIONS; i++) {
+  for (uint8_t i = 0; i < count; i++) {
     if (i == excludeIdx) continue;
-    totalWeight += idleAnimationWeights[i];
+    totalWeight += weights[i];
   }
 
   long roll = random(0, totalWeight);
-  for (uint8_t i = 0; i < NUM_IDLE_ANIMATIONS; i++) {
+  for (uint8_t i = 0; i < count; i++) {
     if (i == excludeIdx) continue;
-    if (roll < idleAnimationWeights[i]) return i;
-    roll -= idleAnimationWeights[i];
+    if (roll < weights[i]) return i;
+    roll -= weights[i];
   }
   return 0; // unreachable -- the loop above always returns before falling off the end
 }
@@ -1774,8 +1969,45 @@ void printIdleAnimationName(uint8_t idx) {
   }
 }
 
-void idleAnimation() {
-  Serial.println(F("Entering idle mode -- type anything to stop."));
+// Same idea as printIdleAnimationName(), indexed against talkAnimations[]
+// instead -- the two pools are ordered differently (talk's has the sound
+// animations appended), so this can't just reuse the idle switch.
+void printTalkAnimationName(uint8_t idx) {
+  Serial.print(F("[talk] "));
+  switch (idx) {
+    case 0: Serial.println(F("tilt")); break;
+    case 1: Serial.println(F("yawn")); break;
+    case 2: Serial.println(F("look around")); break;
+    case 3: Serial.println(F("look hold")); break;
+    case 4: Serial.println(F("chomp")); break;
+    case 5: Serial.println(F("big tilt")); break;
+    case 6: Serial.println(F("look up")); break;
+    case 7: Serial.println(F("sleepy")); break;
+    case 8: Serial.println(F("shake")); break;
+    case 9: Serial.println(F("shake chomp")); break;
+    case 10: Serial.println(F("look down")); break;
+    case 11: Serial.println(F("sniff")); break;
+    case 12: Serial.println(F("neck roll")); break;
+    case 13: Serial.println(F("double blink")); break;
+    case 14: Serial.println(F("ror")); break;
+    case 15: Serial.println(F("ror two")); break;
+    case 16: Serial.println(F("clip5")); break;
+    case 17: Serial.println(F("clip1")); break;
+    case 18: Serial.println(F("clip2_02")); break;
+    default: Serial.println(F("?")); break;
+  }
+}
+
+// The shared engine behind both idle mode and talk mode -- ambient
+// neck sway, eye gaze drift, regular blinking, occasional freezes, and
+// a randomly-picked "big" animation every 10-20 seconds. The two modes
+// are identical here; they only differ in which pool of big animations
+// (and matching weights/name-printer) gets passed in, so idle mode
+// never makes sound and talk mode sometimes does.
+void runIdleLikeMode(const __FlashStringHelper* enterMsg, const __FlashStringHelper* stopMsg,
+                      AnimationFunc* pool, const uint8_t* weights, uint8_t poolCount,
+                      void (*printName)(uint8_t)) {
+  Serial.println(enterMsg);
 
   const char* neckNames[] = { "neck1", "neck2", "neck3" };
   const int neckHome[] = { 90, 90, 90 };
@@ -1814,7 +2046,7 @@ void idleAnimation() {
   long freezeDurationMs = 0;
   bool freezeVarianceRerolled = false; // makes sure the reroll below only fires once per freeze
 
-  while (!Serial.available()) {
+  while (!stopRequested()) {
     if (freezeStartedAt >= 0 && sinceResync - freezeStartedAt >= freezeDurationMs) {
       freezeStartedAt = -1;
       nextFreezeAt = sinceResync + random(6000, 10000);
@@ -1884,7 +2116,7 @@ void idleAnimation() {
     if (sinceResync >= nextBlinkAt) {
       blinkEyelids(); // keeps swaying underneath via its own applyIdleSway() calls
       nextBlinkAt = sinceResync + random(3000, 6000);
-      if (Serial.available()) break;
+      if (stopRequested()) break;
     }
 
     if (sinceResync >= nextBigAnimationAt) {
@@ -1901,7 +2133,7 @@ void idleAnimation() {
       float dampStartScale = idleSwayScale;
       unsigned long dampStartMillis = millis();
       while (millis() - dampStartMillis < (unsigned long)swayDampMs) {
-        if (Serial.available()) break;
+        if (stopRequested()) break;
         float dampT = easeInOutExpo((float)(millis() - dampStartMillis) / swayDampMs);
         idleSwayScale = dampStartScale + dampT * (0.7 - dampStartScale);
         applyIdleSway(true, true, true);
@@ -1909,14 +2141,14 @@ void idleAnimation() {
         delay(swayStepMs);
       }
       idleSwayScale = 0.7;
-      if (Serial.available()) break;
+      if (stopRequested()) break;
 
-      uint8_t idx = pickWeightedIdleAnimation(lastIdleAnimationIdx);
+      uint8_t idx = pickWeightedAnimation(weights, poolCount, lastIdleAnimationIdx);
       lastIdleAnimationIdx = idx;
-      printIdleAnimationName(idx);
-      idleAnimations[idx](); // fires from wherever neck2/neck3 currently are
+      printName(idx);
+      pool[idx](); // fires from wherever neck2/neck3 currently are
 
-      if (Serial.available()) break;
+      if (stopRequested()) break;
 
       // Resync to a clean baseline before the next ambient fade-in.
       moveServosTogether(neckNames, neckHome, 3, 20, 10);
@@ -1955,7 +2187,23 @@ void idleAnimation() {
   const int neckAndEyeHome[] = { 90, 90, 90, 90, 90 };
   moveServosTogether(neckAndEyeNames, neckAndEyeHome, 5, 20, 10);
 
-  Serial.println(F("Idle mode stopped."));
+  Serial.println(stopMsg);
+}
+
+// Type "idle" into the Serial Monitor to start it.
+void idleAnimation() {
+  runIdleLikeMode(F("Entering idle mode -- type anything or press a mode button to stop."), F("Idle mode stopped."),
+                   idleAnimations, idleAnimationWeights, NUM_IDLE_ANIMATIONS, printIdleAnimationName);
+}
+
+// Same as idle mode, but its pool of big animations also includes the
+// sound-synced ones (ror, ror two, clip5, clip1, clip2_02) -- so the
+// dragon can spontaneously bark/roar on its own instead of only ever
+// doing silent gestures. Type "talk" into the Serial Monitor to start
+// it.
+void talkAnimation() {
+  runIdleLikeMode(F("Entering talk mode -- type anything or press a mode button to stop."), F("Talk mode stopped."),
+                   talkAnimations, talkAnimationWeights, NUM_TALK_ANIMATIONS, printTalkAnimationName);
 }
 
 // ============================================================
@@ -2186,6 +2434,31 @@ void handleSerialCommands() {
 
   if (strcasecmp(line, "idle") == 0) {
     idleAnimation();
+    return;
+  }
+
+  if (strcasecmp(line, "talk") == 0) {
+    talkAnimation();
+    return;
+  }
+
+  if (strcasecmp(line, "home") == 0) {
+    homeAnimation();
+    return;
+  }
+
+  if (strcasecmp(line, "buttons") == 0) {
+    Serial.println(F("Reading mode button pins for 15s (1 = released, 0 = pressed) -- press each button..."));
+    unsigned long endAt = millis() + 15000;
+    while (millis() < endAt) {
+      Serial.print(F("idle(25)="));
+      Serial.print(digitalRead(BUTTON_IDLE_PIN));
+      Serial.print(F("  talk(26)="));
+      Serial.print(digitalRead(BUTTON_TALK_PIN));
+      Serial.print(F("  home(27)="));
+      Serial.println(digitalRead(BUTTON_HOME_PIN));
+      delay(250);
+    }
     return;
   }
 
