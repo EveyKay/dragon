@@ -6,7 +6,7 @@ Terry is an animatronic Terrible Terror (from *How to Train Your Dragon*): a dra
 
 **Why I made it:** I wanted a dragon that feels alive rather than one that just replays canned motions, so most of the work went into smoothing the movement and syncing the jaw to real audio.
 
-<!-- Add photos here: ![Terry, finished](images/terry.jpg) -->
+![Terry's 3D-printed head with the eye, servos and jaw frame visible](images/terry-head.jpg)
 
 - Bill of materials: [`BOM.csv`](BOM.csv)
 - CAD (Onshape link and STEP export): [`CAD/`](CAD/)
